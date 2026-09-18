@@ -1,41 +1,23 @@
 # jaspTimeSeries Changelog
 
 > **HOW TO READ AND UPDATE THIS CHANGELOG:**
-> 
+>
 > This document follows a modified [Keep a Changelog](https://keepachangelog.com/) format adapted for the R/JASP ecosystem. Releases are listed in reverse chronological order (newest first).
-> As an example see [jaspModuleTemplate](https://github.com/jasp-stats/jaspModuleTemplate/blob/master/NEWS.md)
-> * **Adding New Changes (For Contributors):** All new commits should be logged at the very top of the file under the `# jaspModuleTemplate (development version)` header. Place your bullet point under the appropriate category (`## Added`, `## Fixed`, etc.). 
-> * **Issue References:** Please reference the relevant GitHub Issue (if any) at the end of your line (e.g., `([Issue #19](https://github.com/jasp-stats/jaspModuleTemplate/issues/19)`). 
-> * **Format Categories:** >   * **Added:** New template features, QML examples, or build tools.
->   * **Changed:** Updates to default configurations, boilerplate code, or dependencies. 
->   * **Fixed:** Bug fixes in the build pipeline, R wrappers, or QML layouts.
->   * **Deprecated / Removed:** Outdated template components or legacy code.
-
+> As an example see [jaspModuleTemplate](https://github.com/jasp-stats/jaspModuleTemplate/blob/master/NEWS.md).
+> * **Adding New Changes (For Contributors):** Add new entries under `# jaspTimeSeries (development version)` and the appropriate category (`## Added`, `## Changed`, `## Fixed`, etc.).
+> * **Issue References:** Reference the relevant GitHub issue when one exists.
+> * **Format Categories:**
+>   * **Added:** New analyses, features, options, or output.
+>   * **Changed:** Updates to existing analyses, defaults, dependencies, or output.
+>   * **Fixed:** Bug fixes in analyses, plots, tables, help, QML layouts, or module infrastructure.
+>   * **Deprecated / Removed:** Outdated analyses, options, or legacy code.
 
 ---
-
 # jaspTimeSeries (development version)
 
-
-
----
-
-# jaspModuleTemplate 0.2.0
-## Added
-* Added NEWS.md
-* Added workflow to remind users to update their `NEWS.md`.
-* Added workflow to auto-bump version when user does not do so.
-
----
-
-# jaspModuleTemplate 0.1.0
-
-## Added
-* Initial examples to showcase JASP module development
-
 ## Changed
-* Use best practices for checking input ([Issue #19](https://github.com/jasp-stats/jaspModuleTemplate/issues/19)).
-* The main results table now defaults to displaying 95% Confidence Intervals for effect sizes.
+* Updated module metadata to use the project website and a consistent package title.
 
 ## Fixed
-* Remove deprecated dependencies from qml files ([Issue #14](https://github.com/jasp-stats/jaspModuleTemplate/issues/14)).
+* Synchronized the module version in `inst/Description.qml` with `DESCRIPTION`.
+* Corrected the translation workflow to target the jaspTimeSeries Weblate components.
