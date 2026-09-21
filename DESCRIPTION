@@ -14,7 +14,8 @@ Imports:
   jaspGraphs,
   jaspDescriptives,
   forecast,
-  lubridate
+  lubridate,
+  tseries
 Suggests:
   testthat
 RoxygenNote: 7.3.3

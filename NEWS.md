@@ -21,3 +21,4 @@
 ## Fixed
 * Synchronized the module version in `inst/Description.qml` with `DESCRIPTION`.
 * Corrected the translation workflow to target the jaspTimeSeries Weblate components.
+* Declared the directly used `tseries` package dependency.
