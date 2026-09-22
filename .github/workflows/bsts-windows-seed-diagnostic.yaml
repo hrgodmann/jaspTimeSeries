@@ -1,0 +1,336 @@
+# TEMPORARY: keep on ErrorDiagnosticBranch; do not merge into the module PR.
+# Only this .yaml file is added. Existing unit/i18n .yml path filters are unchanged.
+name: BSTS Windows seed diagnostic
+
+on:
+  push:
+    branches: [ErrorDiagnosticBranch]
+    paths: [.github/workflows/bsts-windows-seed-diagnostic.yaml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bsts-seed-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare-seed-implementations:
+    if: github.ref == 'refs/heads/ErrorDiagnosticBranch'
+    runs-on: windows-2025
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: Rscript --vanilla {0}
+    env:
+      RENV_CONFIG_AUTOLOADER_ENABLED: 'false'
+      MAKEFLAGS: '-j2'
+    steps:
+      - name: Check out the diagnostic branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up the Windows R and compiler generation used by CI
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          r-version: '4.5.2'
+          rtools-version: '45'
+          Ncpus: 1
+          use-public-rspm: false
+
+      - name: Prepare pinned sources and the one-line intervention
+        working-directory: ${{ runner.temp }}
+        run: |
+          stopifnot(.Platform$OS.type == "windows", getRversion() == "4.5.2")
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
+          stopifnot(!dir.exists(root))
+          for (d in c("downloads", "common", "sources/common", "sources/old",
+                      "sources/fixed", "libraries/old", "libraries/fixed", "evidence"))
+            dir.create(file.path(root, d), recursive = TRUE)
+          evidence <- file.path(root, "evidence")
+          options(timeout = 600, download.file.method = "libcurl")
+
+          sha256 <- function(path) {
+            output <- system2("certutil", c("-hashfile", shQuote(normalizePath(path)), "SHA256"),
+                              stdout = TRUE, stderr = TRUE)
+            if (!is.null(attr(output, "status"))) stop(paste(output, collapse = "\n"))
+            hash <- grep("^[[:xdigit:]]{64}$", gsub("[[:space:]]", "", output), value = TRUE)
+            stopifnot(length(hash) == 1L)
+            tolower(hash)
+          }
+          # Archive SHA-256 values are checked before extracting/building anything.
+          packages <- data.frame(
+            package = c("MASS", "lattice", "zoo", "xts", "Boom", "BoomSpikeSlab", "bsts"),
+            version = c("7.3-66", "0.23-1", "1.9-0", "0.14.3", "0.9.17", "1.2.7", "0.9.11"),
+            sha256 = c("59c619c70bfca653f1c74aef880e69405daefd0134e716a1862ecc5334b4e155",
+                       "34e9b2fc023582c4246959b543c331233c62118efd922bcc1ba72b4888adc590",
+                       "a8ed748aa0200ca096ff50cc7f891aae85a2e5914ffc30785e405887c13b1322",
+                       "152643830df5fbdb8c9d7fbda70352c1edc142a3a54cd14d04f4d309ed524735",
+                       "ef11b703d9315f4e162b81bf227d4513f36be2a9dae30646bcb299506dd2e3c5",
+                       "086de6b5622e4230825fad0a6d83617c5bc63ed995ab323141041eeafda7bb74",
+                       "91355608144ca5ec0fc2c0b763a2012fa025974930cd340674f11a8bc9f43cd5")
+          )
+          packages$url <- packages$actual_sha256 <- NA_character_
+          for (i in seq_len(nrow(packages))) {
+            p <- packages$package[i]
+            filename <- paste0(p, "_", packages$version[i], ".tar.gz")
+            dest <- file.path(root, "downloads", filename)
+            urls <- paste0("https://cran.r-project.org/src/contrib/",
+                           c("", paste0("Archive/", p, "/")), filename)
+            ok <- FALSE
+            for (url in urls) {
+              downloaded <- tryCatch(download.file(url, dest, mode = "wb", quiet = TRUE) == 0L,
+                                     error = function(e) FALSE)
+              if (downloaded) {
+                actual <- sha256(dest)
+                if (!identical(actual, packages$sha256[i])) stop("Source hash mismatch: ", p)
+                packages$url[i] <- url
+                packages$actual_sha256[i] <- actual
+                ok <- TRUE
+                break
+              }
+            }
+            if (!ok) stop("Could not download pinned source: ", filename)
+            arms <- if (p %in% c("Boom", "BoomSpikeSlab", "bsts")) c("old", "fixed") else "common"
+            for (arm in arms) {
+              target <- file.path(root, "sources", arm)
+              untar(dest, exdir = target)
+              desc <- read.dcf(file.path(target, p, "DESCRIPTION"))
+              stopifnot(desc[1, "Package"] == p, desc[1, "Version"] == packages$version[i])
+            }
+          }
+          write.csv(packages, file.path(evidence, "source-archives.csv"), row.names = FALSE)
+          old_file <- file.path(root, "sources/old/Boom/src/distributions/rng.cpp")
+          fixed_file <- file.path(root, "sources/fixed/Boom/src/distributions/rng.cpp")
+          original <- readLines(fixed_file, warn = FALSE)
+          stopifnot(sum(grepl("ans = llround(u);", original, fixed = TRUE)) == 1L)
+          changed <- sub("ans = llround(u);", "ans = lround(u);", original, fixed = TRUE)
+          writeLines(changed, old_file, useBytes = TRUE)
+          # Both arms get the same line-ending normalization, so the sole difference is the expression.
+          writeLines(original, fixed_file, useBytes = TRUE)
+          # The distribution MD5 manifest would be stale after editing; exclude it in BOTH copies.
+          for (arm in c("old", "fixed"))
+            unlink(file.path(root, "sources", arm, "Boom/MD5"))
+          fingerprint <- function(dir) {
+            files <- sort(list.files(dir, recursive = TRUE, all.files = TRUE, no.. = TRUE))
+            setNames(unname(tools::md5sum(file.path(dir, files))), files)
+          }
+          old_tree <- fingerprint(file.path(root, "sources/old"))
+          fixed_tree <- fingerprint(file.path(root, "sources/fixed"))
+          stopifnot(identical(names(old_tree), names(fixed_tree)), !anyNA(old_tree), !anyNA(fixed_tree))
+          differences <- names(old_tree)[old_tree != fixed_tree]
+          stopifnot(identical(differences, "Boom/src/distributions/rng.cpp"))
+          saveRDS(list(old = old_tree, fixed = fixed_tree), file.path(evidence, "source-trees.rds"))
+          writeLines(c("Only differing source file:", differences,
+                       "old: ans = lround(u);", "fixed: ans = llround(u);"),
+                     file.path(evidence, "intervention.txt"))
+          file.copy(old_file, file.path(evidence, "rng-old.cpp"))
+          file.copy(fixed_file, file.path(evidence, "rng-fixed.cpp"))
+          fixture <- file.path(Sys.getenv("GITHUB_WORKSPACE"), "tests/testthat/bstsTest.csv")
+          stopifnot(sha256(fixture) == "3a435b48ebebc78ebb5e4cd516882102e79ee1c5e6e9babb56f93a5189d163f2")
+          stopifnot(file.copy(fixture, file.path(root, "fixture.csv")))
+          writeLines(c(paste("commit", Sys.getenv("GITHUB_SHA")),
+                       paste("image", Sys.getenv("ImageOS"), Sys.getenv("ImageVersion")),
+                       paste("R", R.version.string), paste("fixture_sha256", sha256(fixture)),
+                       paste("MAKEFLAGS", Sys.getenv("MAKEFLAGS"))),
+                     file.path(evidence, "environment.txt"))
+          compiler <- Sys.which("g++")
+          stopifnot(nzchar(compiler))
+          writeLines(system2(compiler, "--version", stdout = TRUE, stderr = TRUE),
+                     file.path(evidence, "compiler.txt"))
+
+          activate <- function(lib) {
+            paths <- normalizePath(c(lib, file.path(root, "common")), winslash = "/")
+            # Makevars starts its own Rscript to find Boom. Export paths to children as well.
+            Sys.setenv(R_LIBS = paste(paths, collapse = .Platform$path.sep),
+                       R_LIBS_USER = paste(paths, collapse = .Platform$path.sep), R_LIBS_SITE = "")
+            .libPaths(c(paths, .Library), include.site = FALSE)
+          }
+          install_source <- function(p, source, lib, label) {
+            logfile <- file.path(evidence, paste0("install-", label, "-", p, ".log"))
+            cat("Building", p, "from source for", label, "\n")
+            status <- system2(file.path(R.home("bin"), "R.exe"),
+              c("CMD", "INSTALL", "--preclean", "--no-multiarch",
+                paste0("--library=", shQuote(lib)), shQuote(source)),
+              stdout = logfile, stderr = logfile)
+            if (status != 0L) {
+              cat(paste(tail(readLines(logfile, warn = FALSE), 100), collapse = "\n"))
+              stop("Source build failed: ", p, " (", label, ")")
+            }
+            stopifnot(normalizePath(find.package(p, lib.loc = lib)) == normalizePath(file.path(lib, p)))
+            expected <- packages$version[match(p, packages$package)]
+            stopifnot(as.character(packageVersion(p, lib.loc = lib)) == expected)
+          }
+          build_and_probe <- function(arm) {
+            stopifnot(arm %in% c("old", "fixed"),
+                      !any(c("Boom", "BoomSpikeSlab", "bsts") %in% loadedNamespaces()))
+            lib <- file.path(root, "libraries", arm)
+            activate(lib)
+            for (p in c("Boom", "BoomSpikeSlab", "bsts")) {
+              if (p != "Boom") {
+                check <- file.path(root, "check-boom-path.R")
+                writeLines('cat(normalizePath(find.package("Boom"), winslash = "/"))', check)
+                resolved <- system2(file.path(R.home("bin"), "Rscript.exe"),
+                  c("--vanilla", shQuote(check)), stdout = TRUE, stderr = TRUE)
+                stopifnot(is.null(attr(resolved, "status")),
+                          identical(resolved, normalizePath(file.path(lib, "Boom"), winslash = "/")))
+                writeLines(resolved, file.path(evidence, paste0("link-path-", arm, "-", p, ".txt")))
+              }
+              install_source(p, file.path(root, "sources", arm, p), lib, arm)
+            }
+            for (p in c("Boom", "BoomSpikeSlab", "bsts"))
+              stopifnot(normalizePath(find.package(p)) == normalizePath(file.path(lib, p)))
+            options(contrasts = c("contr.treatment", "contr.poly"))
+            Sys.setlocale("LC_NUMERIC", "C")
+            d <- read.csv(file.path(root, "fixture.csv"), stringsAsFactors = FALSE)
+            d <- d[c("contNormal", "facGender", "facExperim")]
+            d$facGender <- factor(d$facGender, levels = c("f", "m"))
+            d$facExperim <- factor(d$facExperim, levels = c("control", "experimental"))
+            stopifnot(nrow(d) == 100L, !anyNA(d), all(is.finite(d$contNormal)))
+            set.seed(1)
+            ss <- bsts::AddLocalLevel(list(), d$contNormal)
+            fit <- bsts::bsts(contNormal ~ facGender + facExperim, data = d,
+              state.specification = ss, niter = 10, timestamps = NULL, seed = 1,
+              expected.model.size = 3, model.options = bsts::BstsOptions(timeout.seconds = 120))
+            s <- summary(fit) # Match the backend's default burn-in; do not override it.
+            stats <- c(R2 = s$rsquare, predSd = s$prediction.sd,
+                       relGof = s$relative.gof, resSd = s$residual.sd)
+            stopifnot(length(stats) == 4L, all(is.finite(stats)), nrow(fit$coefficients) == 10L)
+            binaries <- c(list.files(file.path(lib, "Boom/lib"), pattern = "libboom\\.a$",
+                                    full.names = TRUE, recursive = TRUE),
+                          list.files(file.path(lib, "BoomSpikeSlab/libs"), pattern = "\\.dll$",
+                                    full.names = TRUE, recursive = TRUE),
+                          list.files(file.path(lib, "bsts/libs"), pattern = "\\.dll$",
+                                    full.names = TRUE, recursive = TRUE))
+            stopifnot(length(binaries) == 3L)
+            write.csv(data.frame(file = binaries, sha256 = vapply(binaries, sha256, "")),
+                      file.path(evidence, paste0("native-hashes-", arm, ".csv")), row.names = FALSE)
+            provenance <- lapply(packages$package, function(p) {
+              desc <- packageDescription(p)
+              list(package = p, version = desc$Version, built = desc$Built, path = find.package(p))
+            })
+            names(provenance) <- packages$package
+            write.csv(data.frame(statistic = names(stats), value = unname(stats)),
+                      file.path(evidence, paste0("summary-", arm, ".csv")), row.names = FALSE)
+            saveRDS(list(arm = arm, stats = stats, coefficients = s$coefficients, fit = fit,
+                         data = d, model_matrix = model.matrix(contNormal ~ facGender + facExperim, d),
+                         packages = provenance, session = sessionInfo()),
+                    file.path(evidence, paste0("result-", arm, ".rds")))
+            writeLines(capture.output(sessionInfo()), file.path(evidence, paste0("session-", arm, ".txt")))
+            print(stats, digits = 17)
+          }
+          saveRDS(packages, file.path(root, "packages.rds"))
+          dump(c("sha256", "activate", "install_source", "build_and_probe"),
+               file = file.path(root, "helpers.R"))
+
+      - name: Build shared non-Boom dependencies once
+        id: common
+        working-directory: ${{ runner.temp }}
+        run: |
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
+          evidence <- file.path(root, "evidence")
+          packages <- readRDS(file.path(root, "packages.rds"))
+          source(file.path(root, "helpers.R"))
+          activate(file.path(root, "common"))
+          for (p in c("MASS", "lattice", "zoo", "xts"))
+            install_source(p, file.path(root, "sources/common", p), file.path(root, "common"), "common")
+
+      - name: Build and run historical seed conversion
+        id: old
+        working-directory: ${{ runner.temp }}
+        timeout-minutes: 65
+        run: |
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
+          evidence <- file.path(root, "evidence")
+          packages <- readRDS(file.path(root, "packages.rds"))
+          source(file.path(root, "helpers.R"))
+          build_and_probe("old")
+
+      - name: Build and run corrected seed conversion in a fresh process
+        id: fixed
+        working-directory: ${{ runner.temp }}
+        if: ${{ !cancelled() && steps.common.outcome == 'success' }}
+        timeout-minutes: 65
+        run: |
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
+          evidence <- file.path(root, "evidence")
+          packages <- readRDS(file.path(root, "packages.rds"))
+          source(file.path(root, "helpers.R"))
+          build_and_probe("fixed")
+
+      - name: Compare results without replacing expectations
+        working-directory: ${{ runner.temp }}
+        if: ${{ !cancelled() && steps.old.outcome == 'success' && steps.fixed.outcome == 'success' }}
+        run: |
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
+          evidence <- file.path(root, "evidence")
+          old <- readRDS(file.path(evidence, "result-old.rds"))
+          fixed <- readRDS(file.path(evidence, "result-fixed.rds"))
+          stopifnot(identical(old$data, fixed$data), identical(old$model_matrix, fixed$model_matrix))
+          versions <- function(x) vapply(x$packages, function(p) p$version, "")
+          stopifnot(identical(versions(old), versions(fixed)))
+          expected_old <- c(R2 = 0.0579395417976514, predSd = 1.06599469439761,
+                            relGof = 0.546337972019031, resSd = 1.02729362023781)
+          expected_fixed <- c(R2 = 0.0153869242271224, predSd = 1.06857850992189,
+                              relGof = 0.542811453062196, resSd = 1.05023866481121)
+          comparison <- data.frame(statistic = names(expected_old),
+            old_conversion = unname(old$stats), fixed_conversion = unname(fixed$stats),
+            historical_windows = unname(expected_old), established_unix = unname(expected_fixed))
+          write.csv(comparison, file.path(evidence, "comparison.csv"), row.names = FALSE)
+          fields <- c("coefficients", "sigma.obs", "sigma.level", "final.state",
+                      "state.contributions", "one.step.prediction.errors", "log.likelihood")
+          stopifnot(all(fields %in% names(old$fit)), all(fields %in% names(fixed$fit)))
+          differences <- setNames(lapply(fields, function(p)
+            all.equal(old$fit[[p]], fixed$fit[[p]], tolerance = 1e-12)), fields)
+          saveRDS(differences, file.path(evidence, "posterior-differences.rds"))
+          writeLines(capture.output(str(differences)), file.path(evidence, "posterior-differences.txt"))
+          coef_names <- c("facGenderm", "facExperimexperimental")
+          coef_columns <- c("mean", "sd")
+          for (x in list(old, fixed)) {
+            stopifnot(all(coef_names %in% rownames(x$coefficients)),
+                      all(coef_columns %in% colnames(x$coefficients)))
+          }
+          expected_old_coef <- matrix(c(0.609442717859108, 0.0399657905691665,
+                                        0.638874711991056, 0.271697756233028), nrow = 2,
+                                      dimnames = list(coef_names, coef_columns))
+          expected_fixed_coef <- matrix(c(0.461928614855287, -0.0501265437197341,
+                                          0.220891318762768, 0.163978897116324), nrow = 2,
+                                        dimnames = list(coef_names, coef_columns))
+          old_coef <- old$coefficients[coef_names, coef_columns, drop = FALSE]
+          fixed_coef <- fixed$coefficients[coef_names, coef_columns, drop = FALSE]
+          coef_comparison <- data.frame(coefficient = rep(coef_names, 2),
+            statistic = rep(coef_columns, each = 2), old_conversion = as.vector(old_coef),
+            fixed_conversion = as.vector(fixed_coef), historical_windows = as.vector(expected_old_coef),
+            established_unix = as.vector(expected_fixed_coef))
+          write.csv(coef_comparison, file.path(evidence, "coefficient-comparison.csv"), row.names = FALSE)
+          old_matches <- all(is.finite(old_coef)) && all(abs(old$stats - expected_old) < 1e-10) &&
+            all(abs(old_coef - expected_old_coef) < 1e-10)
+          fixed_matches <- all(is.finite(fixed_coef)) && all(abs(fixed$stats - expected_fixed) < 1e-10) &&
+            all(abs(fixed_coef - expected_fixed_coef) < 1e-10)
+          conclusion <- if (old_matches && fixed_matches) {
+            "The one-line seed change reproduces both reference model summaries and coefficient means/SDs."
+          } else {
+            "INCONCLUSIVE for the exact historical difference: inspect both results; do not update expectations."
+          }
+          report <- c("# BSTS controlled Windows seed comparison", "", conclusion, "",
+                      paste("Old conversion matches historical Windows:", old_matches),
+                      paste("Fixed conversion matches established Unix:", fixed_matches), "",
+                      "```", capture.output(print(comparison, digits = 17, row.names = FALSE)), "```", "",
+                      "```", capture.output(print(coef_comparison, digits = 17, row.names = FALSE)), "```", "",
+                      "The tolerance above classifies this experiment; it does not alter any unit-test tolerance.",
+                      "This is a ten-draw sampler diagnostic, not a posterior convergence or whole-module test.",
+                      "See source-archives.csv, source-trees.rds, install logs, native hashes and result RDS files.")
+          writeLines(report, file.path(evidence, "RESULT.md"))
+          writeLines(report, Sys.getenv("GITHUB_STEP_SUMMARY"))
+          # Green means the experiment completed, NOT that the hypothesis necessarily matched.
+          cat(paste(report, collapse = "\n"))
+
+      - name: Upload results and build logs even if a build fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bsts-windows-seed-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bsts-seed-ab/evidence
+          if-no-files-found: warn
+          retention-days: 14
