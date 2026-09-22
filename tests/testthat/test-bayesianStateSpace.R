@@ -197,6 +197,7 @@ options$modelTerms <- list(list(components = "facGender", isNuisance = FALSE), l
 set.seed(1)
 
 
+# Fixed-factor baselines verified with Boom's corrected Windows seed conversion.
 test_that("Model Summary table results match (local level - fixedFactors)", {
   skip_on_os(c("mac","linux"))
   for (i in 1:6){
@@ -205,7 +206,7 @@ test_that("Model Summary table results match (local level - fixedFactors)", {
 
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(0.0579395417976514, 1.06599469439761, 0.546337972019031, 1.02729362023781
+                                   list(0.0153869242271224, 1.06857850992189, 0.542811453062196, 1.05023866481121
                                    ))
   }
 
@@ -218,10 +219,10 @@ test_that("Posterior Summary of Coefficients table results match (local level - 
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsCoefficientSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list("<unicode><unicode><unicode>", "facGenderm", 0.253231187396135,
-                                        0.609442717859108, 1, 1, "", 0.638874711991056, "<unicode><unicode><unicode>",
-                                        "facExperimexperimental", -0.222080709900353, 0.0399657905691665,
-                                        1, 1, "", 0.271697756233028, 0, "(Intercept)", 0, 0, 0, 1, "",
+                                   list("<unicode><unicode><unicode>", "facGenderm", 0.136625688072959,
+                                        0.461928614855287, 1, 1, 0.220891318762768, 0.742348181051067, "<unicode><unicode><unicode>",
+                                        "facExperimexperimental", -0.275546362761004, -0.0501265437197341,
+                                        1, 1, 0.163978897116324, 0.172523964528349, 0, "(Intercept)", 0, 0, 0, 1, 0,
                                         0))
 
   }
