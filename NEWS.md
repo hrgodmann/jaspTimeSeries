@@ -15,6 +15,9 @@
 ---
 # jaspTimeSeries (development version)
 
+## Added
+* Integrated the Bayesian State Space Models analysis from the standalone `jaspBsts` module, originally developed by Fridtjof Petersen.
+
 ## Changed
 * Updated module metadata to use the project website and a consistent package title.
 
