@@ -170,7 +170,7 @@ jobs:
             }
             stopifnot(normalizePath(find.package(p, lib.loc = lib)) == normalizePath(file.path(lib, p)))
             expected <- packages$version[match(p, packages$package)]
-            stopifnot(as.character(packageVersion(p, lib.loc = lib)) == expected)
+            stopifnot(packageVersion(p, lib.loc = lib) == package_version(expected))
           }
           build_and_probe <- function(arm) {
             stopifnot(arm %in% c("old", "fixed"),
