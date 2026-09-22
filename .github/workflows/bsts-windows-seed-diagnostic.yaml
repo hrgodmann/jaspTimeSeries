@@ -26,6 +26,12 @@ jobs:
       RENV_CONFIG_AUTOLOADER_ENABLED: 'false'
       MAKEFLAGS: '-j2'
     steps:
+      - name: Preserve repository bytes on the temporary Windows runner
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
       - name: Check out the diagnostic branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -128,7 +134,11 @@ jobs:
           file.copy(old_file, file.path(evidence, "rng-old.cpp"))
           file.copy(fixed_file, file.path(evidence, "rng-fixed.cpp"))
           fixture <- file.path(Sys.getenv("GITHUB_WORKSPACE"), "tests/testthat/bstsTest.csv")
-          stopifnot(sha256(fixture) == "3a435b48ebebc78ebb5e4cd516882102e79ee1c5e6e9babb56f93a5189d163f2")
+          fixture_hash <- sha256(fixture)
+          expected_fixture_hash <- "3a435b48ebebc78ebb5e4cd516882102e79ee1c5e6e9babb56f93a5189d163f2"
+          writeLines(c(paste("expected", expected_fixture_hash), paste("actual", fixture_hash)),
+                     file.path(evidence, "fixture-hash.txt"))
+          stopifnot(fixture_hash == expected_fixture_hash)
           stopifnot(file.copy(fixture, file.path(root, "fixture.csv")))
           writeLines(c(paste("commit", Sys.getenv("GITHUB_SHA")),
                        paste("image", Sys.getenv("ImageOS"), Sys.getenv("ImageVersion")),
