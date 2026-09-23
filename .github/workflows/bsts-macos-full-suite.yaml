@@ -1,0 +1,302 @@
+# TEMPORARY: only ErrorDiagnosticBranch; never merge this into the module PR.
+# Reproduce the shared macOS lockfile job, with an isolated source-built BSTS overlay.
+# Shared setup reference: jasp-actions e3490635c09dca980f5a9886bfef2a8b20bf2399.
+name: BSTS macOS full suite with source dependencies
+
+on:
+  push:
+    branches: [ErrorDiagnosticBranch]
+    paths: [.github/workflows/bsts-macos-full-suite.yaml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bsts-macos-full-suite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-macos-suite:
+    if: github.ref == 'refs/heads/ErrorDiagnosticBranch'
+    runs-on: macos-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: Rscript {0}
+    env:
+      R_REMOTES_NO_ERRORS_FROM_WARNINGS: 'true'
+      R_REMOTES_UPGRADE: never
+      VDIFFR_RUN_TESTS: 'true'
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      RENV_CONFIG_INSTALL_JOBS: '1'
+      RENV_CONFIG_INSTALL_STAGED: 'false'
+      RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
+      RENV_CONFIG_PAK_ENABLED: 'false'
+      RENV_CONFIG_INSTALL_VERBOSE: 'true'
+      RENV_PATHS_ROOT: ${{ runner.temp }}/renv
+      R_PKG_CACHE_DIR: ${{ runner.temp }}/pkgcache
+      PKG_BUILD_CORES: '1'
+      PAK_CORES: '1'
+      _R_CHECK_LENGTH_1_CONDITION_: 'TRUE'
+      _R_CHECK_MATRIX_DATA_: 'TRUE'
+
+    steps:
+      - name: Check out the latest reviewed merge-branch tests, not the older diagnostic tests
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 415ceb24574ace1bfa25e0dfb184137f02a0317e
+          persist-credentials: false
+
+      - name: Set up R as in the shared macOS job
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          r-version: '4.5.2'
+          Ncpus: 1
+
+      - name: Set up system dependencies
+        uses: r-hub/actions/setup-r-sysreqs@cf6c8eff3145ef225104294e6b0c023de4bba9c6 # v1
+        with:
+          type: full
+
+      - name: Preserve input identity before dependency setup
+        shell: Rscript --vanilla {0}
+        working-directory: ${{ runner.temp }}
+        run: |
+          stopifnot(Sys.info()[["sysname"]] == "Darwin", R.version$arch == "aarch64",
+            getRversion() == "4.5.2")
+          root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-macos-full-suite")
+          stopifnot(!dir.exists(root))
+          evidence <- file.path(root, "evidence")
+          dir.create(evidence, recursive = TRUE)
+          workspace <- Sys.getenv("GITHUB_WORKSPACE")
+          lock <- file.path(workspace, "renv.lock")
+          stopifnot(file.copy(lock, file.path(evidence, "input-renv.lock")))
+          value <- system2("shasum", c("-a", "256", shQuote(lock)), stdout = TRUE)
+          stopifnot(is.null(attr(value, "status")))
+          writeLines(strsplit(value, "[[:space:]]+")[[1L]][1L], file.path(evidence, "input-lock.sha256"))
+          writeLines(c(paste("Workflow commit:", Sys.getenv("GITHUB_SHA")),
+            "Module commit: 415ceb24574ace1bfa25e0dfb184137f02a0317e",
+            paste("Run:", Sys.getenv("GITHUB_RUN_ID"), Sys.getenv("GITHUB_RUN_ATTEMPT")),
+            R.version.string), file.path(evidence, "input.txt"))
+
+      - name: Install the renv revision used by shared CI
+        run: |
+          install.packages("renv")
+          renv::install("rstudio/renv@44b3f47219d103b866c44fcff61e3d81e1b6cb9f")
+
+      - name: Restore the unchanged lock without sharing Actions caches
+        uses: r-lib/actions/setup-renv@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          cache-version: 6
+          bypass-cache: 'true'
+
+      - name: Install the reviewed jaspTools revision used for this check
+        run: |
+          renv::install("jasp-stats/jaspTools@55ab6bcd2e3828fc923a9bdf513c50a06da3d6ad")
+
+      - name: Rebuild only BSTS dependencies and run the unchanged full suite
+        env:
+          MAKEFLAGS: '-j2'
+        run: |
+          # Embedded in the temporary full-suite workflow, after the standard CI restore.
+          # No local execution on sourcing; the workflow explicitly calls run_full_suite().
+          suite_sha256 <- function(path) {
+            value <- system2("shasum", c("-a", "256", shQuote(path)), stdout = TRUE, stderr = TRUE)
+            stopifnot(is.null(attr(value, "status")), length(value) == 1L)
+            value <- strsplit(value, "[[:space:]]+")[[1L]][1L]
+            stopifnot(grepl("^[[:xdigit:]]{64}$", value))
+            tolower(value)
+          }
+
+          suite_activate <- function(paths) {
+            paths <- unique(normalizePath(paths, mustWork = TRUE))
+            .libPaths(paths, include.site = FALSE)
+            value <- paste(.libPaths(), collapse = .Platform$path.sep)
+            Sys.setenv(R_LIBS = value, R_LIBS_USER = value, R_LIBS_SITE = "",
+              RENV_CONFIG_AUTOLOADER_ENABLED = "false")
+          }
+
+          suite_child <- quote({
+            config <- readRDS(commandArgs(trailingOnly = TRUE)[1L])
+            mode <- commandArgs(trailingOnly = TRUE)[2L]
+            suite_activate <- config$activate
+            suite_activate(config$paths)
+            stopifnot(getwd() == config$workspace, Sys.getenv("CI") == "true",
+              Sys.getenv("VDIFFR_RUN_TESTS") == "true",
+              !any(c(config$core, "jaspTools") %in% loadedNamespaces()))
+            for (p in config$core) {
+              expected <- normalizePath(file.path(config$overlay, p))
+              stopifnot(normalizePath(find.package(p)) == expected,
+                package_version(packageVersion(p)) == package_version(config$versions[[p]]))
+              loadNamespace(p)
+              stopifnot(normalizePath(getNamespaceInfo(asNamespace(p), "path")) == expected)
+            }
+            for (p in c("BoomSpikeSlab", "bsts"))
+              stopifnot(startsWith(normalizePath(getLoadedDLLs()[[p]][["path"]]), paste0(config$overlay, "/")))
+            tools_path <- normalizePath(file.path(config$overlay, "jaspTools"))
+            stopifnot(normalizePath(find.package("jaspTools")) == tools_path,
+              identical(packageDescription("jaspTools")$RemoteSha, config$tools_sha))
+            loadNamespace("jaspTools")
+            stopifnot(normalizePath(getNamespaceInfo(asNamespace("jaspTools"), "path")) == tools_path)
+            # Capture every locked package's actual version and GitHub SHA before tests.
+            inventory <- lapply(names(config$lock$Packages), function(p) {
+              record <- config$lock$Packages[[p]]
+              path <- find.package(p)
+              d <- as.list(read.dcf(file.path(path, "DESCRIPTION"))[1L, ])
+              stopifnot(package_version(d$Version) == package_version(record$Version))
+              if (!is.null(record$RemoteSha)) stopifnot(identical(d$RemoteSha, record$RemoteSha))
+              list(path = path, description = d)
+            })
+            names(inventory) <- names(config$lock$Packages)
+            saveRDS(list(session = sessionInfo(), paths = .libPaths(), inventory = inventory,
+              core = lapply(config$core, function(p) getNamespaceInfo(asNamespace(p), "path")),
+              jaspTools = packageDescription("jaspTools")),
+              file.path(config$evidence, paste0(mode, "-environment.rds")))
+            if (mode == "setup") {
+              jaspTools::setupJaspTools()
+            } else {
+              stopifnot(mode == "tests")
+              writeLines("Starting unchanged tests/testthat.R", file.path(config$evidence, "tests-started.txt"))
+              source("tests/testthat.R")
+              # The supported CI runner normally quits R with the actual suite status.
+              stop("Unexpected return from the CI test entrypoint; inspect the runner")
+            }
+          })
+
+          run_full_suite <- function() {
+            target <- "415ceb24574ace1bfa25e0dfb184137f02a0317e"
+            stopifnot(Sys.info()[["sysname"]] == "Darwin", R.version$arch == "aarch64",
+              getRversion() == "4.5.2", Sys.getenv("CI") == "true")
+            workspace <- normalizePath(Sys.getenv("GITHUB_WORKSPACE"), mustWork = TRUE)
+            stopifnot(normalizePath(getwd()) == workspace,
+              identical(system2("git", c("rev-parse", "HEAD"), stdout = TRUE), target))
+            root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-macos-full-suite")
+            evidence <- file.path(root, "evidence")
+            stopifnot(dir.exists(evidence))
+            overlay <- file.path(root, "source-library")
+            for (d in c(overlay, file.path(root, "sources"), file.path(evidence, "downloads")))
+              stopifnot(dir.create(d, recursive = TRUE, showWarnings = FALSE))
+            lock_path <- file.path(workspace, "renv.lock")
+            input_hash <- readLines(file.path(evidence, "input-lock.sha256"))
+            stopifnot(identical(suite_sha256(lock_path), input_hash))
+            lock <- renv::lockfile_read(lock_path)
+            core <- c("Boom", "BoomSpikeSlab", "bsts")
+            versions <- setNames(c("0.9.17", "1.2.7", "0.9.11"), core)
+            hashes <- setNames(c("ef11b703d9315f4e162b81bf227d4513f36be2a9dae30646bcb299506dd2e3c5",
+              "086de6b5622e4230825fad0a6d83617c5bc63ed995ab323141041eeafda7bb74",
+              "91355608144ca5ec0fc2c0b763a2012fa025974930cd340674f11a8bc9f43cd5"), core)
+            stopifnot(all(vapply(core, function(p) identical(lock$Packages[[p]]$Version, versions[[p]]), TRUE)))
+            restored_paths <- .libPaths()
+            preserved <- c(core, "jaspTools")
+            original <- setNames(lapply(preserved, function(p) {
+              path <- find.package(p)
+              files <- sort(list.files(path, recursive = TRUE, full.names = TRUE))
+              list(path = normalizePath(path), files = files, hashes = tools::md5sum(files))
+            }), preserved)
+            saveRDS(list(module_commit = target, workflow_commit = Sys.getenv("GITHUB_SHA"),
+              run_id = Sys.getenv("GITHUB_RUN_ID"), run_attempt = Sys.getenv("GITHUB_RUN_ATTEMPT"),
+              image = Sys.getenv(c("ImageOS", "ImageVersion", "RUNNER_ARCH")), R = R.version,
+              restored_paths = restored_paths, original = original, lock = lock),
+              file.path(evidence, "provenance.rds"))
+            config <- list(paths = c(overlay, restored_paths), overlay = normalizePath(overlay),
+              core = core, versions = versions, lock = lock, workspace = workspace,
+              evidence = evidence, activate = suite_activate,
+              tools_sha = "55ab6bcd2e3828fc923a9bdf513c50a06da3d6ad")
+            # setupJaspTools writes resources into its own installation. Keep those writes
+            # in the overlay as well, not in the restored package/cache directory.
+            stopifnot(file.copy(original$jaspTools$path, overlay, recursive = TRUE),
+              dir.exists(file.path(overlay, "jaspTools")))
+            suite_activate(config$paths)
+            options(timeout = 600, download.file.method = "libcurl")
+            downloads <- list()
+            for (p in core) {
+              filename <- paste0(p, "_", versions[[p]], ".tar.gz")
+              archive <- file.path(evidence, "downloads", filename)
+              urls <- paste0("https://cran.r-project.org/src/contrib/", c("", paste0("Archive/", p, "/")), filename)
+              ok <- FALSE
+              for (url in urls) {
+                ok <- tryCatch(download.file(url, archive, mode = "wb", quiet = TRUE) == 0L,
+                  error = function(e) FALSE)
+                if (ok) break
+              }
+              stopifnot(ok, suite_sha256(archive) == hashes[[p]])
+              downloads[[p]] <- list(url = url, sha256 = hashes[[p]])
+              saveRDS(downloads, file.path(evidence, "source-archives.rds"))
+              members <- untar(archive, list = TRUE)
+              stopifnot(all(!startsWith(members, "/")), all(!grepl("(^|/)\\.\\.(/|$)", members)))
+              untar(archive, exdir = file.path(root, "sources"))
+              source <- file.path(root, "sources", p)
+              d <- read.dcf(file.path(source, "DESCRIPTION"))
+              stopifnot(d[1L, "Package"] == p, d[1L, "Version"] == versions[[p]])
+              if (p != "Boom") {
+                expression <- sprintf("stopifnot(normalizePath(find.package('Boom')) == %s); cat(system.file('lib', package='Boom'))",
+                  deparse(normalizePath(file.path(overlay, "Boom"))))
+                resolved <- system2(file.path(R.home("bin"), "Rscript"),
+                  c("--vanilla", "-e", shQuote(expression)), stdout = TRUE, stderr = TRUE)
+                writeLines(resolved, file.path(evidence, paste0("resolved-Boom-", p, ".txt")))
+                stopifnot(is.null(attr(resolved, "status")))
+              }
+              cat("Building", p, versions[[p]], "from verified source into isolated overlay\n")
+              log <- file.path(evidence, paste0("install-source-", p, ".log"))
+              status <- system2(file.path(R.home("bin"), "R"),
+                c("CMD", "INSTALL", "--preclean", "--no-multiarch", paste0("--library=", shQuote(overlay)), shQuote(source)),
+                stdout = log, stderr = log)
+              if (status != 0L) stop("Source installation failed: ", p, "; see ", basename(log))
+              stopifnot(normalizePath(find.package(p)) == normalizePath(file.path(overlay, p)),
+                packageVersion(p) == package_version(versions[[p]]))
+            }
+            config_path <- file.path(root, "config.rds")
+            saveRDS(config, config_path)
+            script <- file.path(root, "run.R")
+            dput(suite_child, script)
+            file.copy(script, file.path(evidence, "run.R"))
+            statuses <- list()
+            for (mode in c("setup", "tests")) {
+              log <- file.path(evidence, paste0(mode, ".log"))
+              status <- system2(file.path(R.home("bin"), "Rscript"), c("--vanilla", shQuote(script), shQuote(config_path), mode),
+                stdout = log, stderr = log)
+              statuses[[mode]] <- as.integer(status)
+              saveRDS(statuses, file.path(evidence, "exit-statuses.rds"))
+              cat(paste(readLines(log, warn = FALSE), collapse = "\n"), "\n")
+              if (mode == "setup" && status != 0L) stop("jaspTools setup/load guard failed; tests were not run")
+            }
+            unchanged <- all(vapply(original, function(x) identical(tools::md5sum(x$files), x$hashes), TRUE))
+            lock_unchanged <- identical(suite_sha256(lock_path), input_hash)
+            # Generated .new.svg candidates are expected; tracked code/expectations must not change.
+            diff <- system2("git", c("diff", "--exit-code", "--", "R", "tests", "inst", "DESCRIPTION", "NAMESPACE", "renv.lock"),
+              stdout = TRUE, stderr = TRUE)
+            writeLines(diff, file.path(evidence, "tracked-source.diff"))
+            source_unchanged <- is.null(attr(diff, "status"))
+            started <- file.exists(file.path(evidence, "tests-started.txt"))
+            passed <- identical(statuses$tests, 0L) && started && unchanged && lock_unchanged && source_unchanged
+            summary <- c("# macOS full suite with same-version source-built BSTS dependencies", "",
+              paste("Module commit:", target), paste("Test process exit:", statuses$tests),
+              paste("Test entrypoint reached:", started), paste("Original three BSTS packages and jaspTools unchanged:", unchanged),
+              paste("Lock unchanged:", lock_unchanged), paste("Tracked module/tests/expectations unchanged:", source_unchanged), "",
+              if (passed) "PASS: unchanged full suite succeeded with the source overlay." else "FAIL: inspect tests.log and exit-statuses.rds; no expectations accepted.",
+              "This is a temporary diagnostic, not a change to standard JASP CI or its downloaded binaries.")
+            writeLines(summary, file.path(evidence, "summary.md"))
+            cat(paste(summary, collapse = "\n"), "\n")
+            if (nzchar(Sys.getenv("GITHUB_STEP_SUMMARY")))
+              cat(paste(summary, collapse = "\n"), "\n", file = Sys.getenv("GITHUB_STEP_SUMMARY"), append = TRUE)
+            stopifnot(passed)
+          }
+          run_full_suite()
+
+      - name: Upload setup, build, package and complete test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bsts-macos-full-suite-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bsts-macos-full-suite/evidence
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload any snapshot candidates without accepting them
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bsts-macos-full-suite-snapshots-${{ github.run_id }}-${{ github.run_attempt }}
+          path: tests/testthat/_snaps/**/*.new.svg
+          retention-days: 14
+          if-no-files-found: ignore
