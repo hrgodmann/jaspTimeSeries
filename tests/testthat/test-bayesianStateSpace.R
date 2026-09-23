@@ -18,6 +18,7 @@ test_that("Model Summary table results match (AR - manual)", {
   options <- jaspTools::analysisOptions("bayesianStateSpace")
   options$dependent <- "contNormal"
   options$autoregressiveComponent <- TRUE
+  options$localLevelComponent <- FALSE
   options$samples <- 10
 
   set.seed(1)
@@ -26,7 +27,7 @@ test_that("Model Summary table results match (AR - manual)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(0.411857605442053, 1.05018027614687, 0.542967391044393, 0.811701682421661
+                                   list(0.314607509367699, 1.05068512793848, 0.543107992387219, 0.876243631114363
                                    ))
   }
 
@@ -37,6 +38,7 @@ test_that("Model Summary table results match (AR - automatic)", {
   options <- jaspTools::analysisOptions("bayesianStateSpace")
   options$dependent <- "contNormal"
   options$autoregressiveComponent <- TRUE
+  options$localLevelComponent <- FALSE
   options$lagSelectionMethod <- "auto"
   options$maxLags <- 4
   options$samples <- 10
@@ -47,7 +49,7 @@ test_that("Model Summary table results match (AR - automatic)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(0.535488123460269, 1.05773803700731, 0.539404673068745, 0.72136258779103
+                                   list(0.549871515593311, 1.05769993725513, 0.539387282554917, 0.710106440387526
                                    ))
   }
 
@@ -67,7 +69,7 @@ test_that("Model Summary table results match (local level)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(-0.0432055353493266, 1.09380783381569, 0.520147149047757, 1.08103597020621
+                                   list(-0.0762491443534843, 1.09400650414813, 0.519902709350384, 1.09802344438273
                                    ))
   }
 
@@ -79,6 +81,7 @@ test_that("Model Summary table results match (local linear trend)", {
   options <- jaspTools::analysisOptions("bayesianStateSpace")
   options$dependent <- "contNormal"
   options$localLinearTrendComponent <- TRUE
+  options$localLevelComponent <- FALSE
   options$samples <- 10
 
   set.seed(1)
@@ -87,7 +90,7 @@ test_that("Model Summary table results match (local linear trend)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(-0.0777667265276332, 1.20104889746718, 0.423311739669594, 1.09879731436253
+                                   list(-0.110766726762034, 1.20050404586317, 0.423811661472609, 1.11549244792232
                                    ))
   }
 
@@ -106,7 +109,7 @@ test_that("Model Summary table results match (semi-local linear trend)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(-0.0432055353493266, 1.09380783381569, 0.520147149047757, 1.08103597020621
+                                   list(-0.0762491443534843, 1.09400650414813, 0.519902709350384, 1.09802344438273
                                    ))
   }
 
@@ -133,7 +136,7 @@ test_that("Model Summary table results match (seasonal)", {
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(-0.0394752039178554, 1.12753310072425, 0.490267461631722, 1.07910143584074
+                                   list(-0.0781263744430147, 1.12728326564074, 0.490397326469068, 1.09898063195421
                                    ))
   }
 
@@ -161,7 +164,7 @@ test_that("Model Summary table results match (local level - covariates)", {
 
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsModelSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list(0.0446411563379834, 1.07342874539745, 0.538811093349419, 1.03451899091434
+                                   list(0.00213853172231659, 1.0755654786762, 0.53451984213854, 1.05728076187172
                                    ))
   }
 
@@ -174,10 +177,10 @@ test_that("Posterior Summary of Coefficients table results match (local level - 
     results <- jaspTools::runAnalysis("bayesianStateSpace", "bstsTest.csv", options)
     table <- results[["results"]][["bstsMainContainer"]][["collection"]][["bstsMainContainer_bstsCoefficientSummaryTable"]][["data"]]
     jaspTools::expect_equal_tables(table,
-                                   list("<unicode><unicode><unicode>", "contcor1", 0.0710805371191776,
-                                        0.314637544172676, 1, 1, "", 0.375148071900377, "<unicode><unicode><unicode>",
-                                        "contcor2", -0.287511723102937, -0.11088682615349, 1, 1, "",
-                                        0.0421351582659255, 0, "(Intercept)", 0, 0, 0, 1, "", 0))
+                                   list("<unicode><unicode><unicode>", "contcor1", 0.0437460818434989,
+                                        0.275790341778563, 1, 1, 0.142009518230305, 0.434946375191193, "<unicode><unicode><unicode>",
+                                        "contcor2", -0.321932103241681, -0.173635046880455, 1, 1, 0.105996027757027,
+                                        -0.0310099257617435, 0, "(Intercept)", 0, 0, 0, 1, 0, 0))
 
   }
 
