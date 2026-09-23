@@ -1,0 +1,361 @@
+# TEMPORARY: keep on ErrorDiagnosticBranch; do not merge into the module PR.
+# This .yaml file does not match the existing unit/i18n .yml path filters.
+name: BSTS macOS binary and source diagnostic
+
+on:
+  push:
+    branches: [ErrorDiagnosticBranch]
+    paths: [.github/workflows/bsts-macos-library-diagnostic.yaml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bsts-macos-library-diagnostic-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare-native-libraries:
+    if: github.ref == 'refs/heads/ErrorDiagnosticBranch'
+    runs-on: macos-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: Rscript --vanilla {0}
+    env:
+      RENV_CONFIG_AUTOLOADER_ENABLED: 'false'
+      MAKEFLAGS: '-j2'
+    steps:
+      - name: Check out the diagnostic branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up the R version used by macOS CI
+        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
+        with:
+          r-version: '4.5.2'
+          Ncpus: 1
+          use-public-rspm: false
+
+      - name: Set up macOS build requirements as in the shared unit-test workflow
+        uses: r-hub/actions/setup-r-sysreqs@cf6c8eff3145ef225104294e6b0c023de4bba9c6 # v1
+        with:
+          type: full
+
+      - name: Compare isolated binary and source installations
+        working-directory: ${{ runner.temp }}
+        env:
+          BSTS_RUN_MACOS_DIAGNOSTIC: 'true'
+        run: |
+          # Embedded verbatim in the temporary macOS diagnostic workflow.
+          # Local sourcing defines helpers only; execution requires an explicit environment flag.
+          diagnostic_plan <- function() data.frame(
+            package = c("MASS", "lattice", "zoo", "xts", "Boom", "BoomSpikeSlab", "bsts"),
+            version = c("7.3-66", "0.23-1", "1.9-0", "0.14.3", "0.9.17", "1.2.7", "0.9.11"),
+            source_sha256 = c("59c619c70bfca653f1c74aef880e69405daefd0134e716a1862ecc5334b4e155",
+              "34e9b2fc023582c4246959b543c331233c62118efd922bcc1ba72b4888adc590",
+              "a8ed748aa0200ca096ff50cc7f891aae85a2e5914ffc30785e405887c13b1322",
+              "152643830df5fbdb8c9d7fbda70352c1edc142a3a54cd14d04f4d309ed524735",
+              "ef11b703d9315f4e162b81bf227d4513f36be2a9dae30646bcb299506dd2e3c5",
+              "086de6b5622e4230825fad0a6d83617c5bc63ed995ab323141041eeafda7bb74",
+              "91355608144ca5ec0fc2c0b763a2012fa025974930cd340674f11a8bc9f43cd5"))
+
+          sha256 <- function(path) {
+            output <- system2("shasum", c("-a", "256", shQuote(path)), stdout = TRUE, stderr = TRUE)
+            stopifnot(is.null(attr(output, "status")), length(output) == 1L)
+            hash <- strsplit(output, "[[:space:]]+")[[1L]][1L]
+            stopifnot(grepl("^[[:xdigit:]]{64}$", hash))
+            tolower(hash)
+          }
+
+          capture_command <- function(command, args = character()) {
+            output <- suppressWarnings(system2(command, args, stdout = TRUE, stderr = TRUE))
+            list(status = if (is.null(attr(output, "status"))) 0L else attr(output, "status"), output = output)
+          }
+
+          locked_version <- function(lines, package) {
+            start <- which(trimws(lines) == paste0('"', package, '": {'))
+            stopifnot(length(start) == 1L)
+            # This lock uses flat package records; stop at that record's closing brace.
+            end <- start + which(trimws(lines[seq.int(start + 1L, length(lines))]) %in% c("}", "},"))[1L]
+            field <- lines[seq.int(start, end)]
+            field <- field[startsWith(trimws(field), '"Version":')]
+            stopifnot(length(field) == 1L)
+            strsplit(field, '"', fixed = TRUE)[[1L]][4L]
+          }
+
+          activate <- function(lib, common) {
+            paths <- unique(normalizePath(c(lib, common), mustWork = TRUE))
+            value <- paste(paths, collapse = .Platform$path.sep)
+            Sys.setenv(R_LIBS = value, R_LIBS_USER = value, R_LIBS_SITE = "",
+              RENV_CONFIG_AUTOLOADER_ENABLED = "false")
+            .libPaths(c(paths, .Library), include.site = FALSE)
+          }
+
+          package_record <- function(package, lib, expected) {
+            path <- normalizePath(file.path(lib, package), mustWork = TRUE)
+            desc <- read.dcf(file.path(path, "DESCRIPTION"))
+            stopifnot(desc[1L, "Package"] == package,
+              package_version(desc[1L, "Version"]) == package_version(expected))
+            list(path = path, description = desc)
+          }
+
+          native_inventory <- function(lib, package, output) {
+            path <- file.path(lib, package)
+            if (!dir.exists(path)) return(list(missing = path))
+            dir.create(output, recursive = TRUE, showWarnings = FALSE)
+            desc <- file.path(path, "DESCRIPTION")
+            if (file.exists(desc)) file.copy(desc, file.path(output, "DESCRIPTION"), overwrite = TRUE)
+            files <- list.files(path, pattern = "[.](so|dylib|a)$", recursive = TRUE, full.names = TRUE)
+            records <- lapply(files, function(file) {
+              relative <- substring(file, nchar(path) + 2L)
+              target <- file.path(output, relative)
+              dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
+              stopifnot(file.copy(file, target, overwrite = TRUE))
+              undefined <- capture_command("nm", c("-u", shQuote(file)))
+              defined <- capture_command("nm", c("-gU", shQuote(file)))
+              list(file = relative, sha256 = sha256(file),
+                architecture = capture_command("file", shQuote(file)),
+                linkage = if (endsWith(file, ".a")) NULL else capture_command("otool", c("-L", shQuote(file))),
+                undefined = undefined,
+                relevant_defined = grep("GlobalRng|seed_rng|kmpc|omp_", defined$output, value = TRUE),
+                defined_status = defined$status)
+            })
+            names(records) <- substring(files, nchar(path) + 2L)
+            saveRDS(records, file.path(output, "native-records.rds"))
+            capture.output(records, file = file.path(output, "native-records.txt"))
+            records
+          }
+
+          # Written to RUNNER_TEMP and executed once per target in a fresh R process.
+          probe_expression <- quote({
+            args <- commandArgs(trailingOnly = TRUE)
+            stopifnot(length(args) == 5L)
+            lib <- args[1L]; common <- args[2L]; package <- args[3L]
+            output <- args[4L]; plan <- readRDS(args[5L])
+            .libPaths(c(lib, common, .Library), include.site = FALSE)
+            answer <- list(package = package, libPaths = .libPaths(),
+              R = R.version.string, platform = R.version$platform,
+              loaded_before = loadedNamespaces(),
+              dlls_before = lapply(getLoadedDLLs(), function(dll)
+                list(name = dll[["name"]], path = dll[["path"]], dynamicLookup = dll[["dynamicLookup"]])),
+              ok = FALSE)
+            warnings <- character()
+            answer$error <- tryCatch(withCallingHandlers({
+              records <- lapply(seq_len(nrow(plan)), function(i) {
+                p <- plan$package[i]
+                wanted <- file.path(if (p %in% c("Boom", "BoomSpikeSlab", "bsts")) lib else common, p)
+                actual <- find.package(p)
+                stopifnot(identical(normalizePath(actual), normalizePath(wanted)))
+                desc <- read.dcf(file.path(actual, "DESCRIPTION"))
+                stopifnot(package_version(desc[1L, "Version"]) == package_version(plan$version[i]))
+                list(path = actual, description = desc)
+              })
+              names(records) <- plan$package
+              answer$packages <- records
+              loadNamespace(package)
+              for (p in intersect(plan$package, loadedNamespaces()))
+                stopifnot(identical(normalizePath(getNamespaceInfo(asNamespace(p), "path")),
+                  normalizePath(records[[p]]$path)))
+              NULL
+            }, warning = function(w) {
+              warnings <<- c(warnings, conditionMessage(w))
+              invokeRestart("muffleWarning")
+            }), error = function(e) conditionMessage(e))
+            answer$ok <- is.null(answer$error)
+            answer$warnings <- warnings
+            answer$loaded_after <- loadedNamespaces()
+            answer$dlls_after <- lapply(getLoadedDLLs(), function(dll)
+              list(name = dll[["name"]], path = dll[["path"]], dynamicLookup = dll[["dynamicLookup"]]))
+            answer$session <- sessionInfo()
+            saveRDS(answer, paste0(output, ".rds"))
+            capture.output(answer, file = paste0(output, ".txt"))
+            cat(package, if (answer$ok) "LOAD PASS" else paste("LOAD FAIL:", answer$error), "\n")
+            quit(save = "no", status = if (answer$ok) 0L else 1L)
+          })
+
+          classify <- function(binary, source) {
+            complete <- function(arm) isTRUE(arm$installed) && length(arm$probes) == 3L &&
+              all(vapply(arm$probes, function(p) !is.null(p$result) &&
+                identical(p$status, if (isTRUE(p$result$ok)) 0L else 1L), TRUE))
+            if (!complete(binary) || !complete(source)) return("INCOMPLETE: inspect installation/probe logs")
+            passes <- function(arm) all(vapply(arm$probes, function(p) isTRUE(p$result$ok), TRUE))
+            if (passes(binary) && passes(source)) return("NOT REPRODUCED: both fresh installations load")
+            if (!passes(binary) && passes(source)) return("BINARY LOAD FAILURE / SOURCE LOAD SUCCESS")
+            if (passes(binary) && !passes(source)) return("SOURCE LOAD FAILURE: binary installation loads")
+            "BOTH INSTALLATIONS FAIL TO LOAD: inspect errors; no fix established"
+          }
+
+          run_diagnostic <- function() {
+            stopifnot(Sys.info()[["sysname"]] == "Darwin", getRversion() == "4.5.2",
+              R.version$arch == "aarch64")
+            root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-macos-library-ab")
+            workspace <- Sys.getenv("GITHUB_WORKSPACE")
+            stopifnot(nzchar(Sys.getenv("RUNNER_TEMP")), nzchar(workspace), !dir.exists(root))
+            for (d in c("evidence/downloads", "common", "libraries/binary", "libraries/source", "sources"))
+              dir.create(file.path(root, d), recursive = TRUE, showWarnings = FALSE)
+            evidence <- file.path(root, "evidence")
+            common <- file.path(root, "common")
+            plan <- diagnostic_plan()
+            core <- c("Boom", "BoomSpikeSlab", "bsts")
+            lock <- file.path(workspace, "renv.lock")
+            stopifnot(identical(vapply(plan$package, function(p) locked_version(readLines(lock), p), ""),
+              setNames(plan$version, plan$package)))
+            file.copy(lock, file.path(evidence, "input-renv.lock"))
+            saveRDS(plan, file.path(root, "plan.rds"))
+            dput(probe_expression, file.path(root, "probe.R"))
+            # No project activation, pak/renv cache, optional packages or model tests.
+            options(timeout = 600, download.file.method = "libcurl")
+            metadata <- list(commit = Sys.getenv("GITHUB_SHA"),
+              run_id = Sys.getenv("GITHUB_RUN_ID"), run_attempt = Sys.getenv("GITHUB_RUN_ATTEMPT"),
+              image = Sys.getenv(c("ImageOS", "ImageVersion", "RUNNER_ARCH")),
+              makeflags = Sys.getenv("MAKEFLAGS"),
+              R = R.version, session = sessionInfo(), lock_sha256 = sha256(lock),
+              compiler = capture_command("clang++", "--version"),
+              R_config = capture_command(file.path(R.home("bin"), "R"), c("CMD", "config", "--all")),
+              system = capture_command("sw_vers"),
+              scope = "Fresh binaries versus coherent source rebuild of the same three core versions; shared common binaries. Not the original CI cache or full JASP run.")
+            saveRDS(metadata, file.path(evidence, "environment.rds"))
+            capture.output(metadata, file = file.path(evidence, "environment.txt"))
+            file.copy(file.path(root, "probe.R"), file.path(evidence, "probe.R"))
+            downloads <- list()
+            download <- function(p, type) {
+              i <- match(p, plan$package); version <- plan$version[i]
+              filename <- paste0(p, "_", version, if (type == "binary") ".tgz" else ".tar.gz")
+              dest <- file.path(evidence, "downloads", filename)
+              urls <- if (type == "binary") paste0(
+                contrib.url("https://packagemanager.posit.co/cran/latest", type = "binary"), "/", filename) else
+                paste0("https://cran.r-project.org/src/contrib/", c("", paste0("Archive/", p, "/")), filename)
+              attempts <- list(); success <- FALSE
+              for (url in urls) {
+                attempt <- tryCatch({
+                  stopifnot(download.file(url, dest, quiet = TRUE, mode = "wb") == 0L)
+                  hash <- sha256(dest)
+                  if (type == "source" && hash != plan$source_sha256[i]) stop("Source SHA-256 mismatch")
+                  list(url = url, sha256 = hash, bytes = file.info(dest)$size)
+                }, error = function(e) list(url = url, error = conditionMessage(e)))
+                attempts[[length(attempts) + 1L]] <- attempt
+                if (is.null(attempt$error)) { success <- TRUE; break }
+              }
+              downloads[[paste(p, type)]] <<- attempts
+              saveRDS(downloads, file.path(evidence, "downloads.rds"))
+              capture.output(downloads, file = file.path(evidence, "downloads.txt"))
+              if (!success) stop("Download unavailable/invalid: ", p, " ", type)
+              # A binary is never silently replaced by a source package.
+              members <- untar(dest, list = TRUE)
+              stopifnot(all(!startsWith(members, "/")),
+                all(!grepl("(^|/)\\.\\.(/|$)", members)),
+                paste0(p, "/DESCRIPTION") %in% members)
+              if (type == "source") {
+                untar(dest, exdir = file.path(root, "sources"))
+                package_record(p, file.path(root, "sources"), version)
+                return(file.path(root, "sources", p))
+              }
+              dest
+            }
+            install_one <- function(p, type, lib, label) {
+              archive <- download(p, type)
+              activate(lib, common)
+              logfile <- file.path(evidence, paste0("install-", label, "-", p, ".log"))
+              if (type == "source" && p %in% c("BoomSpikeSlab", "bsts")) {
+                expression <- sprintf("stopifnot(normalizePath(find.package('Boom')) == %s); cat(system.file('lib', package='Boom'))",
+                  deparse(normalizePath(file.path(lib, "Boom"))))
+                resolved <- capture_command(file.path(R.home("bin"), "Rscript"),
+                  c("--vanilla", "-e", shQuote(expression)))
+                capture.output(resolved, file = file.path(evidence, paste0("resolved-Boom-", p, ".txt")))
+                stopifnot(resolved$status == 0L)
+              }
+              cat("Installing", p, plan$version[match(p, plan$package)], type, "in", label, "\n")
+              if (type == "binary") {
+                expression <- sprintf("install.packages(%s, lib=%s, repos=NULL, type='binary')",
+                  deparse(archive), deparse(lib))
+                status <- system2(file.path(R.home("bin"), "Rscript"),
+                  c("--vanilla", "-e", shQuote(expression)), stdout = logfile, stderr = logfile)
+              } else {
+                status <- system2(file.path(R.home("bin"), "R"),
+                  c("CMD", "INSTALL", "--preclean", "--no-multiarch", paste0("--library=", shQuote(lib)),
+                    shQuote(archive)), stdout = logfile, stderr = logfile)
+              }
+              if (status != 0L) stop("Installation failed: ", p, " (", label, "); see ", basename(logfile))
+              package_record(p, lib, plan$version[match(p, plan$package)])
+            }
+            common_records <- lapply(plan$package[1:4], install_one, type = "binary", lib = common, label = "common")
+            names(common_records) <- plan$package[1:4]
+            saveRDS(common_records, file.path(evidence, "common-packages.rds"))
+            common_hashes <- function() {
+              files <- sort(list.files(common, recursive = TRUE, full.names = TRUE))
+              setNames(unname(tools::md5sum(files)), substring(files, nchar(common) + 2L))
+            }
+            before_common <- common_hashes()
+            run_arm <- function(type) {
+              lib <- file.path(root, "libraries", type)
+              answer <- list(type = type, installed = FALSE, packages = list(), probes = list())
+              answer$error <- tryCatch({
+                for (p in core) answer$packages[[p]] <- install_one(p, type, lib, type)
+                answer$installed <- TRUE
+                activate(lib, common)
+                for (p in core) {
+                  output <- file.path(evidence, paste0("load-", type, "-", p))
+                  status <- system2(file.path(R.home("bin"), "Rscript"),
+                    c("--vanilla", shQuote(file.path(root, "probe.R")), shQuote(lib), shQuote(common), p,
+                      shQuote(output), shQuote(file.path(root, "plan.rds"))),
+                    stdout = paste0(output, ".log"), stderr = paste0(output, ".log"))
+                  result <- if (file.exists(paste0(output, ".rds"))) readRDS(paste0(output, ".rds")) else NULL
+                  answer$probes[[p]] <- list(status = as.integer(status), result = result)
+                  cat(type, p, "probe exit", status, "\n")
+                }
+                NULL
+              }, error = function(e) conditionMessage(e))
+              # Preserve partial installs and binaries even if the build or a probe failed.
+              answer$native <- lapply(setNames(core, core), function(p)
+                tryCatch(native_inventory(lib, p, file.path(evidence, "native", type, p)),
+                  error = function(e) list(error = conditionMessage(e))))
+              if (type == "source") {
+                files <- list.files(file.path(root, "sources"), pattern = "^Makevars$", recursive = TRUE, full.names = TRUE)
+                for (file in files) {
+                  relative <- substring(file, nchar(file.path(root, "sources")) + 2L)
+                  target <- file.path(evidence, "source-build-files", relative)
+                  dir.create(dirname(target), recursive = TRUE, showWarnings = FALSE)
+                  file.copy(file, target, overwrite = TRUE)
+                }
+              }
+              saveRDS(answer, file.path(evidence, paste0("arm-", type, ".rds")))
+              answer
+            }
+            binary <- run_arm("binary")
+            source <- run_arm("source")
+            unchanged_common <- identical(before_common, common_hashes())
+            verdict <- classify(binary, source)
+            messages <- vapply(binary$probes, function(p)
+              if (is.null(p$result$error)) "" else p$result$error, "")
+            reproduced_symbol <- any(grepl("__ZN4BOOM9GlobalRng3rngE", messages, fixed = TRUE))
+            summary <- c("# BSTS macOS native-library diagnostic", "", verdict, "",
+              paste("Reported CI symbol reproduced:", reproduced_symbol),
+              paste("Shared common library unchanged:", unchanged_common),
+              paste("Binary installation error:", if (is.null(binary$error)) "none" else binary$error),
+              paste("Source installation error:", if (is.null(source$error)) "none" else source$error), "",
+              "A successful job means evidence collection and source-load checks succeeded, not that module tests passed.",
+              "Fresh binaries may differ from the failing CI cache. If both arms load, the historical failure is NOT reproduced.",
+              "No model fitting, statistical expectations, package versions or module files were changed.")
+            writeLines(summary, file.path(evidence, "summary.md"))
+            cat(paste(summary, collapse = "\n"), "\n")
+            if (nzchar(Sys.getenv("GITHUB_STEP_SUMMARY")))
+              cat(paste(summary, collapse = "\n"), "\n", file = Sys.getenv("GITHUB_STEP_SUMMARY"), append = TRUE)
+            saveRDS(list(verdict = verdict, reproduced_symbol = reproduced_symbol,
+              unchanged_common = unchanged_common, common_hashes = before_common), file.path(evidence, "comparison.rds"))
+            source_passes <- isTRUE(source$installed) && length(source$probes) == 3L &&
+              all(vapply(source$probes, function(p) isTRUE(p$result$ok) && p$status == 0L, TRUE))
+            stopifnot(unchanged_common, !startsWith(verdict, "INCOMPLETE"), source_passes)
+          }
+
+          if (identical(Sys.getenv("BSTS_RUN_MACOS_DIAGNOSTIC"), "true")) run_diagnostic()
+
+      - name: Upload diagnostic evidence even after a failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bsts-macos-library-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bsts-macos-library-ab/evidence
+          retention-days: 14
+          if-no-files-found: warn
