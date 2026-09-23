@@ -1,6 +1,6 @@
 # TEMPORARY: keep on ErrorDiagnosticBranch; do not merge into the module PR.
 # Only this .yaml file is added. Existing unit/i18n .yml path filters are unchanged.
-name: BSTS Windows seed diagnostic
+name: BSTS Windows model and seed diagnostic
 
 on:
   push:
@@ -140,6 +140,18 @@ jobs:
                      file.path(evidence, "fixture-hash.txt"))
           stopifnot(fixture_hash == expected_fixture_hash)
           stopifnot(file.copy(fixture, file.path(root, "fixture.csv")))
+          # Keep the exact source and original expectations used by this experiment.
+          workspace <- Sys.getenv("GITHUB_WORKSPACE")
+          reference_paths <- c("R/bayesianStateSpace.R",
+            "tests/testthat/test-bayesianStateSpace.R", "inst/qml/bayesianStateSpace.qml")
+          reference_names <- c("backend.R", "reference-tests.R", "reference-form.qml")
+          for (i in seq_along(reference_paths))
+            stopifnot(file.copy(file.path(workspace, reference_paths[i]),
+              file.path(evidence, reference_names[i])))
+          stopifnot(file.copy(fixture, file.path(evidence, "fixture.csv")))
+          write.csv(data.frame(source = reference_paths, artifact = reference_names,
+            sha256 = vapply(file.path(evidence, reference_names), sha256, "")),
+            file.path(evidence, "module-input-hashes.csv"), row.names = FALSE)
           writeLines(c(paste("commit", Sys.getenv("GITHUB_SHA")),
                        paste("image", Sys.getenv("ImageOS"), Sys.getenv("ImageVersion")),
                        paste("R", R.version.string), paste("fixture_sha256", sha256(fixture)),
@@ -172,6 +184,469 @@ jobs:
             expected <- packages$version[match(p, packages$package)]
             stopifnot(packageVersion(p, lib.loc = lib) == package_version(expected))
           }
+          # Pure model diagnostic functions embedded into the temporary Windows workflow.
+          # No JASP result constructors, installs, test runners or repository writes here.
+          load_batch_backend <- function(path) {
+            wanted <- c(".bstsResultsHelper", ".bstsGetPredictors", ".bstsGetFormula",
+                        ".bstsFillCoefficientTable")
+            ast <- as.list(parse(path, keep.source = FALSE))
+            definitions <- Filter(function(x) is.call(x) &&
+              identical(x[[1L]], as.name("<-")) && is.symbol(x[[2L]]) &&
+              as.character(x[[2L]]) %in% wanted, ast)
+            stopifnot(length(definitions) == length(wanted),
+              setequal(vapply(definitions, function(x) as.character(x[[2L]]), ""), wanted))
+            backend <- new.env(parent = globalenv())
+            for (definition in definitions) eval(definition, backend)
+            backend
+          }
+
+          make_batch_cases <- function() {
+            # All fit/table settings consumed by the unchanged backend. Local validation
+            # checks these against analysisOptions plus the real test assignments.
+            base <- list(dependent = "contNormal", time = "dateYear",
+              autoregressiveComponent = FALSE, lagSelectionMethod = "manual",
+              lags = 1, maxLags = 1, localLevelComponent = TRUE,
+              localLinearTrendComponent = FALSE, semiLocalLinearTrendComponent = FALSE,
+              dynamicRegregressionComponent = FALSE, covariates = character(),
+              fixedFactors = character(), modelTerms = list(), seasonalities = list(),
+              samples = 10, seed = 1, expectedPredictors = 1, timeout = 120,
+              posteriorSummaryTable = FALSE, posteriorSummaryCiLevel = .95,
+              showCoefMeanInc = FALSE)
+            cases <- list(local_level = base)
+            seasonal <- base
+            # Preserve the historical fixture's partial-matching field, not a test repair.
+            seasonal$seasonalities <- list(list(normalPriorMean = 0, numbers = 2,
+              name = "season", inverseGammaPriorN = .01, duration = 1,
+              normalPriorSd = "", inverseGammaPriorSd = ""))
+            cases$seasonal <- seasonal
+            covariates <- base
+            covariates$covariates <- c("contcor1", "contcor2")
+            covariates$modelTerms <- lapply(covariates$covariates, function(x)
+              list(components = x, isNuisance = FALSE))
+            covariates$expectedPredictors <- 3
+            covariates$posteriorSummaryTable <- TRUE
+            cases$covariates <- covariates
+            factors <- base
+            factors$fixedFactors <- c("facGender", "facExperim")
+            factors$modelTerms <- lapply(factors$fixedFactors, function(x)
+              list(components = x, isNuisance = FALSE))
+            factors$expectedPredictors <- 3
+            factors$posteriorSummaryTable <- TRUE
+            cases$fixed_factors_control <- factors
+            for (model in c("manual_ar", "automatic_ar", "local_linear_trend")) {
+              selected <- base
+              if (model == "local_linear_trend") selected$localLinearTrendComponent <- TRUE else
+                selected$autoregressiveComponent <- TRUE
+              if (model == "automatic_ar") {
+                selected$lagSelectionMethod <- "auto"
+                selected$maxLags <- 4
+              }
+              for (level in c("off", "on")) {
+                selected$localLevelComponent <- identical(level, "on")
+                cases[[paste(model, level, sep = "_")]] <- selected
+              }
+              pair <- cases[paste(model, c("off", "on"), sep = "_")]
+              differences <- names(base)[!vapply(names(base), function(n)
+                identical(pair[[1L]][[n]], pair[[2L]][[n]]), TRUE)]
+              stopifnot(identical(differences, "localLevelComponent"))
+            }
+            stopifnot(length(cases) == 10L)
+            cases
+          }
+
+          batch_data <- function(fixture, options) {
+            d <- read.csv(fixture, stringsAsFactors = FALSE, check.names = FALSE)
+            d <- d[unique(c(options$dependent, options$covariates, options$fixedFactors))]
+            if (length(options$fixedFactors)) {
+              d$facGender <- factor(d$facGender, levels = c("f", "m"))
+              d$facExperim <- factor(d$facExperim, levels = c("control", "experimental"))
+            }
+            stopifnot(nrow(d) == 100L, !anyNA(d), all(is.finite(d$contNormal)))
+            d
+          }
+
+          batch_coefficient_rows <- function(backend, fit, options) {
+            rows <- list()
+            table <- list(addRows = function(row) rows[[length(rows) + 1L]] <<- row)
+            backend$.bstsFillCoefficientTable(fit, table, options, TRUE)
+            rows
+          }
+
+          probe_batch_cases <- function(backend_path, fixture, evidence_dir, arm) {
+            options(contrasts = c("contr.treatment", "contr.poly"))
+            stopifnot(!is.na(Sys.setlocale("LC_NUMERIC", "C")))
+            backend <- load_batch_backend(backend_path)
+            cases <- make_batch_cases()
+            saveRDS(cases, file.path(evidence_dir, paste0("input-options-", arm, ".rds")))
+            results <- list()
+            for (key in names(cases)) {
+              cat("Fitting", arm, key, "\n")
+              setting <- cases[[key]]
+              d <- batch_data(fixture, setting)
+              observed_warnings <- character()
+              set.seed(1)
+              initial_rng <- .Random.seed
+              output <- tryCatch(withCallingHandlers({
+                fit <- backend$.bstsResultsHelper(d, setting)
+                saveRDS(fit, file.path(evidence_dir, paste0("fit-", arm, "-", key, ".rds")))
+                stopifnot(fit$niter == 10L, length(fit$original.series) == 100L)
+                expected_states <- if (key == "seasonal") c("LocalLevel", "Seasonal") else
+                  if (grepl("^local_linear_trend", key)) {
+                    if (setting$localLevelComponent) c("LocalLevel", "LocalLinearTrend") else "LocalLinearTrend"
+                  } else if (grepl("_ar_", key)) {
+                    first <- if (setting$lagSelectionMethod == "auto") "AutoAr" else "ArProcess"
+                    if (setting$localLevelComponent) c(first, "LocalLevel") else first
+                  } else "LocalLevel"
+                stopifnot(length(fit$state.specification) == length(expected_states),
+                  all(vapply(seq_along(expected_states), function(i)
+                    inherits(fit$state.specification[[i]], expected_states[i]), TRUE)))
+                s <- summary(fit) # Match the backend: no explicit burn-in override.
+                stats <- c(R2 = s$rsquare, predSd = s$prediction.sd,
+                  relGof = s$relative.gof, resSd = s$residual.sd)
+                stopifnot(length(stats) == 4L, all(is.finite(stats)))
+                coef_rows <- if (setting$posteriorSummaryTable)
+                  batch_coefficient_rows(backend, fit, setting) else NULL
+                matrix <- if (length(setting$modelTerms)) model.matrix(
+                  backend$.bstsGetFormula(d$contNormal, setting,
+                    backend$.bstsGetPredictors(setting$modelTerms)), d) else NULL
+                list(stats = stats, coefficient_rows = coef_rows, fit = fit,
+                  options = setting, data = d, model_matrix = matrix,
+                  initial_rng = initial_rng, burn = bsts::SuggestBurn(.1, fit))
+              }, warning = function(w) observed_warnings <<- c(observed_warnings, conditionMessage(w))),
+              error = function(e) list(error = conditionMessage(e), options = setting,
+                data = d, initial_rng = initial_rng))
+              output$warnings <- observed_warnings
+              results[[key]] <- output
+              saveRDS(output, file.path(evidence_dir, paste0("case-", arm, "-", key, ".rds")))
+              if (is.null(output$error)) print(output$stats, digits = 17) else
+                cat("MODEL ERROR (retained; continuing other cases):", output$error, "\n")
+            }
+            results
+          }
+
+          # Diagnostic-only reference extraction and comparison. Never rewrites tests.
+          # No packages, refitting, or internal jaspResults objects are required here.
+
+          bsts_diagnostic_schema <- function() {
+            list(stats = c("R2", "predSd", "relGof", "resSd"),
+                 coefficients = c("BFinc", "coef", "lowerCri", "mean", "postIncP",
+                                  "priorIncP", "sd", "upperCri"))
+          }
+
+          bsts_collect_calls <- function(x, predicate) {
+            found <- list()
+            visit <- function(y) {
+              if (is.call(y) && predicate(y)) found[[length(found) + 1L]] <<- y
+              if (is.call(y) || is.expression(y) || is.pairlist(y))
+                for (child in as.list(y)) visit(child)
+            }
+            visit(x)
+            found
+          }
+
+          bsts_literal_list <- function(x) {
+            scalar <- function(y) (is.atomic(y) && length(y) == 1L) ||
+              (is.call(y) && length(y) == 2L && identical(y[[1L]], as.name("-")) &&
+                 is.numeric(y[[2L]]) && length(y[[2L]]) == 1L)
+            if (!is.call(x) || !identical(x[[1L]], as.name("list")) ||
+                !all(vapply(as.list(x)[-1L], scalar, TRUE)))
+              stop("Expected a literal list of scalar test reference values")
+            eval(x, baseenv())
+          }
+
+          prepare_references <- function(test_file) {
+            ast <- parse(test_file, keep.source = FALSE)
+            schema <- bsts_diagnostic_schema()
+            expected_for <- function(title) {
+              tests <- bsts_collect_calls(ast, function(x) length(x) >= 3L &&
+                identical(x[[1L]], as.name("test_that")) && identical(x[[2L]], title))
+              if (length(tests) != 2L) stop("Expected Windows and Unix tests for: ", title)
+              required_skips <- list(quote(skip_on_os(c("mac", "linux"))),
+                                     quote(skip_on_os("windows")))
+              out <- lapply(seq_along(tests), function(i) {
+                block <- as.list(tests[[i]][[3L]])
+                if (length(block) < 2L || !identical(block[[2L]], required_skips[[i]]))
+                  stop("Unexpected OS skip/order for: ", title)
+                calls <- bsts_collect_calls(tests[[i]][[3L]], function(x)
+                  identical(x[[1L]], quote(jaspTools::expect_equal_tables)))
+                if (length(calls) != 1L || length(calls[[1L]]) != 3L)
+                  stop("Expected one simple table assertion for: ", title)
+                bsts_literal_list(calls[[1L]][[3L]])
+              })
+              setNames(out, c("old_windows", "unix"))
+            }
+            titles <- c(local_level = "local level", seasonal = "seasonal",
+              covariates = "local level - covariates", fixed_factors_control = "local level - fixedFactors",
+              manual_ar = "AR - manual", automatic_ar = "AR - automatic",
+              local_linear_trend = "local linear trend")
+            cases <- lapply(titles, function(title) {
+              summary <- expected_for(paste0("Model Summary table results match (", title, ")"))
+              lapply(summary, function(x) {
+                if (length(x) != length(schema$stats) ||
+                    !all(vapply(x, function(y) is.numeric(y) && is.finite(y), TRUE)))
+                  stop("Invalid model-summary reference: ", title)
+                list(stats = setNames(unlist(x, use.names = FALSE), schema$stats))
+              })
+            })
+            for (key in c("covariates", "fixed_factors_control")) {
+              rows <- expected_for(paste0("Posterior Summary of Coefficients table results match (",
+                titles[[key]], ")"))
+              for (arm in names(rows)) {
+                values <- rows[[arm]]
+                width <- length(schema$coefficients)
+                if (!length(values) || length(values) %% width != 0L)
+                  stop("Invalid coefficient reference width: ", key)
+                decoded <- lapply(seq(1L, length(values), by = width), function(i)
+                  setNames(values[i:(i + width - 1L)], schema$coefficients))
+                labels <- vapply(decoded, function(row) {
+                  if (!is.character(row$coef) || length(row$coef) != 1L ||
+                      is.na(row$coef) || !nzchar(row$coef)) stop("Invalid coefficient label")
+                  row$coef
+                }, "")
+                if (anyDuplicated(labels)) stop("Duplicate coefficient reference labels: ", key)
+                cases[[key]][[arm]]$coefficient_rows <- decoded
+              }
+            }
+            # The legacy 'semi-local' block is a duplicate local-level test, not an LLT fit.
+            duplicate <- expected_for("Model Summary table results match (semi-local linear trend)")
+            for (arm in names(duplicate))
+              if (!identical(unname(cases$local_level[[arm]]$stats),
+                             unlist(duplicate[[arm]], use.names = FALSE)))
+                stop("Semi-local reference no longer duplicates local level; review mapping")
+            # Reported current Windows ON-model values, not historical model references.
+            # CI_inbetween/windows.md lines 295, 361, 487; that pasted log has no run SHA.
+            current_ci <- list(
+              manual_ar_on = c(R2 = .317631987560515, predSd = 1.08920591942384,
+                relGof = .524710971766672, resSd = .874308163542163),
+              automatic_ar_on = c(R2 = .197713125510981, predSd = 1.09065239742285,
+                relGof = .52395200106799, resSd = .948025560805256),
+              local_linear_trend_on = c(R2 = -.0221832211116859, predSd = 1.21361234384141,
+                relGof = .411545598183293, resSd = 1.07008820564096))
+            list(cases = cases, schema = schema, current_ci = current_ci,
+                 current_ci_source = list(file = "CI_inbetween/windows.md",
+                   sha256 = "350e5d6598b1abe9184cf4ff18fa4eef4446f82c2b1de3e47c20078b34a2168d",
+                   limitation = "User-supplied log lacks embedded run/commit SHA; not native-binary provenance"),
+                 test_file = normalizePath(test_file),
+                 test_file_md5 = unname(tools::md5sum(test_file)),
+                 note = "Literal reference lists extracted by title, verified Windows/Unix order")
+          }
+
+          bsts_cell_value <- function(x, field) {
+            if (length(x) != 1L) return(list(valid = FALSE, value = NA_real_, kind = "invalid"))
+            if (field == "coef") {
+              ok <- is.character(x) && !is.na(x) && nzchar(x)
+              return(list(valid = ok, value = x, kind = "label"))
+            }
+            if (is.character(x) && identical(x, "")) x <- NA_real_
+            if (field == "BFinc" && is.character(x) && !is.na(x) &&
+                grepl("^(<unicode>)+$", x)) x <- Inf
+            if (!is.numeric(x) && !is.logical(x))
+              return(list(valid = FALSE, value = NA_real_, kind = "invalid"))
+            if (is.na(x)) return(list(valid = TRUE, value = NA_real_, kind = "missing"))
+            list(valid = TRUE, value = as.numeric(x),
+                 kind = if (is.infinite(x)) "infinity" else "number")
+          }
+
+          bsts_compare_cell <- function(actual, expected, field, tolerance) {
+            a <- bsts_cell_value(actual, field)
+            e <- bsts_cell_value(expected, field)
+            delta <- NA_real_
+            matches <- FALSE
+            if (a$valid && e$valid && identical(a$kind, e$kind)) {
+              matches <- switch(e$kind,
+                label = identical(a$value, e$value), missing = TRUE,
+                infinity = identical(a$value, e$value),
+                number = { delta <- abs(a$value - e$value); delta <= tolerance }, FALSE)
+            }
+            show <- function(value) {
+              if (length(value) != 1L) return(paste(capture.output(dput(value)), collapse = " "))
+              if (is.na(value)) return("NA")
+              if (is.numeric(value)) return(format(value, digits = 17L, scientific = FALSE, trim = TRUE))
+              as.character(value)
+            }
+            list(actual = show(actual), expected = show(expected), actual_kind = a$kind,
+                 expected_kind = e$kind, absolute_error = delta, matches = isTRUE(matches))
+          }
+
+          bsts_package_versions <- function(result) {
+            x <- result$package_versions
+            if (is.null(x) && is.list(result$packages))
+              x <- vapply(result$packages, function(p) as.character(p$version), "")
+            if (!is.character(x) || !length(x) || is.null(names(x)) ||
+                anyNA(x) || any(!nzchar(x)) || anyNA(names(x)) ||
+                any(!nzchar(names(x))) || anyDuplicated(names(x)))
+              stop("Missing/invalid named package-version fingerprint")
+            x[order(names(x))]
+          }
+
+          compare_batch <- function(old, fixed, references, evidence_dir, tolerance = 1e-12) {
+            stopifnot(length(tolerance) == 1L, is.finite(tolerance), tolerance > 0,
+                      dir.exists(evidence_dir))
+            schema <- bsts_diagnostic_schema()
+            keys <- c("local_level", "seasonal", "covariates", "fixed_factors_control",
+              "manual_ar_off", "manual_ar_on", "automatic_ar_off", "automatic_ar_on",
+              "local_linear_trend_off", "local_linear_trend_on")
+            controls <- cells <- ci_cells <- conclusions <- list()
+            check <- function(key, name, condition, detail = "") {
+              controls[[length(controls) + 1L]] <<- data.frame(case = key, check = name,
+                passes = isTRUE(condition), detail = as.character(detail), stringsAsFactors = FALSE)
+            }
+            safe_equal <- function(a, b) !is.null(a) && !is.null(b) && identical(a, b)
+            versions <- tryCatch({
+              a <- bsts_package_versions(old)
+              b <- bsts_package_versions(fixed)
+              check("ALL", "same_package_versions", identical(a, b),
+                paste(capture.output(print(list(old = a, fixed = b))), collapse = " "))
+              identical(a, b)
+            }, error = function(e) {
+              check("ALL", "same_package_versions", FALSE, conditionMessage(e)); FALSE
+            })
+            if (!is.null(old$input_sha256) || !is.null(fixed$input_sha256))
+              check("ALL", "same_input_sha256", safe_equal(old$input_sha256, fixed$input_sha256))
+            compare_table <- function(key, arm, table, actual, expected) {
+              if (table == "summary") {
+                shape <- is.numeric(actual) && length(actual) == length(schema$stats) &&
+                  !anyDuplicated(names(actual)) && setequal(names(actual), schema$stats)
+                check(key, paste(arm, "summary_schema", sep = ":"), shape)
+                for (field in schema$stats) {
+                  value <- if (!is.null(names(actual)) && field %in% names(actual)) actual[[field]] else NULL
+                  cell <- bsts_compare_cell(value, expected[[field]], field, tolerance)
+                  cells[[length(cells) + 1L]] <<- cbind(data.frame(case = key, arm = arm,
+                    table = table, row = "model", field = field), as.data.frame(cell))
+                }
+              } else {
+                labels <- function(rows) vapply(rows, function(row)
+                  if (is.list(row) && is.character(row$coef) && length(row$coef) == 1L &&
+                      !is.na(row$coef)) row$coef else "<invalid>", "")
+                observed_labels <- labels(actual)
+                expected_labels <- labels(expected)
+                check(key, paste(arm, "coefficient_row_labels_and_order", sep = ":"),
+                  identical(observed_labels, expected_labels),
+                  paste("actual:", paste(observed_labels, collapse = ","),
+                        "expected:", paste(expected_labels, collapse = ",")))
+                for (i in seq_along(expected)) {
+                  observed <- if (length(actual) >= i) actual[[i]] else list()
+                  check(key, paste(arm, "coefficient_schema", i, sep = ":"),
+                    is.list(observed) && length(observed) == length(schema$coefficients) &&
+                      !anyDuplicated(names(observed)) && setequal(names(observed), schema$coefficients))
+                  for (field in schema$coefficients) {
+                    value <- if (is.list(observed) && field %in% names(observed)) observed[[field]] else NULL
+                    cell <- bsts_compare_cell(value, expected[[i]][[field]], field, tolerance)
+                    cells[[length(cells) + 1L]] <<- cbind(data.frame(case = key, arm = arm,
+                      table = table, row = expected_labels[[i]], field = field), as.data.frame(cell))
+                  }
+                }
+              }
+            }
+            for (key in keys) {
+              diagnostic_only <- grepl("_on$", key)
+              reference_key <- sub("_(off|on)$", "", key)
+              case_error <- tryCatch({
+                a <- old$cases[[key]]
+                b <- fixed$cases[[key]]
+                if (is.null(a) || is.null(b)) stop("Case missing from one or both arms")
+                if (!is.null(a$error) || !is.null(b$error))
+                  stop(paste("old:", paste(a$error, collapse = " "),
+                             "fixed:", paste(b$error, collapse = " ")))
+                check(key, "same_data", safe_equal(a$data, b$data))
+                check(key, "same_options", safe_equal(a$options, b$options))
+                check(key, "same_initial_rng", safe_equal(a$initial_rng, b$initial_rng))
+                check(key, "same_model_matrix", identical(a$model_matrix, b$model_matrix))
+                check(key, "same_state_specification",
+                  safe_equal(a$fit$state.specification, b$fit$state.specification))
+                check(key, "same_fitted_series", safe_equal(a$fit$original.series, b$fit$original.series))
+                check(key, "ten_draws_both_arms", isTRUE(a$fit$niter == 10L) &&
+                  isTRUE(b$fit$niter == 10L) && isTRUE(a$options$samples == 10L) &&
+                  isTRUE(b$options$samples == 10L))
+                if (!diagnostic_only) {
+                  reference <- references$cases[[reference_key]]
+                  if (is.null(reference)) stop("Missing extracted reference: ", reference_key)
+                  for (arm in c("old", "fixed")) {
+                    actual <- if (arm == "old") a else b
+                    expected <- reference[[if (arm == "old") "old_windows" else "unix"]]
+                    compare_table(key, arm, "summary", actual$stats, expected$stats)
+                    if (!is.null(expected$coefficient_rows))
+                      compare_table(key, arm, "coefficients", actual$coefficient_rows,
+                                    expected$coefficient_rows)
+                  }
+                } else if (!is.null(references$current_ci[[key]])) {
+                  # This is a separate current-CI reproduction check, never an old-baseline verdict.
+                  for (field in schema$stats) {
+                    observed <- if (!is.null(names(b$stats)) && field %in% names(b$stats))
+                      b$stats[[field]] else NULL
+                    cell <- bsts_compare_cell(observed, references$current_ci[[key]][[field]], field, tolerance)
+                    ci_cells[[length(ci_cells) + 1L]] <- cbind(data.frame(case = key,
+                      arm = "fixed", field = field), as.data.frame(cell))
+                  }
+                }
+                NULL
+              }, error = function(e) conditionMessage(e))
+              if (!is.null(case_error)) check(key, "case_completed", FALSE, case_error)
+              conclusions[[key]] <- list(diagnostic_only = diagnostic_only, error = case_error)
+            }
+            # Confirm factorial ON/OFF comparisons alter no other input option or data.
+            for (family in c("manual_ar", "automatic_ar", "local_linear_trend")) {
+              for (arm in c("old", "fixed")) {
+                result <- if (arm == "old") old else fixed
+                on <- result$cases[[paste0(family, "_on")]]
+                off <- result$cases[[paste0(family, "_off")]]
+                ok <- !is.null(on$options) && !is.null(off$options) &&
+                  identical(names(on$options), names(off$options)) &&
+                  isTRUE(on$options$localLevelComponent) && identical(off$options$localLevelComponent, FALSE)
+                if (ok) {
+                  remaining <- setdiff(names(on$options), "localLevelComponent")
+                  ok <- identical(on$options[remaining], off$options[remaining]) &&
+                    safe_equal(on$data, off$data) && safe_equal(on$initial_rng, off$initial_rng)
+                }
+                for (suffix in c("off", "on"))
+                  check(paste0(family, "_", suffix), paste(arm, "on_off_only_local_level", sep = ":"), ok)
+              }
+            }
+            controls <- do.call(rbind, controls)
+            cells <- if (length(cells)) do.call(rbind, cells) else data.frame(
+              case = character(), arm = character(), table = character(), row = character(),
+              field = character(), actual = character(), expected = character(),
+              actual_kind = character(), expected_kind = character(), absolute_error = numeric(), matches = logical())
+            ci_cells <- if (length(ci_cells)) do.call(rbind, ci_cells) else data.frame(
+              case = character(), arm = character(), field = character(), actual = character(),
+              expected = character(), actual_kind = character(), expected_kind = character(),
+              absolute_error = numeric(), matches = logical())
+            summary <- do.call(rbind, lapply(keys, function(key) {
+              checks <- controls$passes[controls$case %in% c("ALL", key)]
+              observed <- cells[cells$case == key, , drop = FALSE]
+              info <- conclusions[[key]]
+              status <- if (!is.null(info$error)) "CASE_ERROR" else if (!all(checks)) "CONTROL_FAILURE" else
+                if (info$diagnostic_only) "DIAGNOSTIC_ONLY" else if (!nrow(observed) || !all(observed$matches))
+                  "REFERENCE_MISMATCH" else "MATCHES_BOTH_REFERENCES"
+              ci <- ci_cells[ci_cells$case == key, , drop = FALSE]
+              data.frame(case = key, status = status, controls_pass = all(checks),
+                cells_checked = nrow(observed), cells_matched = sum(observed$matches),
+                current_ci_matches = if (nrow(ci)) all(ci$matches) else NA,
+                error = if (is.null(info$error)) "" else info$error, stringsAsFactors = FALSE)
+            }))
+            result <- list(summary = summary, controls = controls, cells = cells, current_ci = ci_cells,
+              tolerance = tolerance, references = references,
+              note = paste("ON cases are diagnostic controls, not comparisons against old single-component references.",
+                "Blank numeric reference cells mean missing values; BFinc Unicode placeholders mean positive infinity.",
+                "Coefficient values are mapped by the actual full named table schema, including SD and upper CI separately.",
+                "Current-CI ON comparisons are separate; the known local macOS versus CI LLT-ON discrepancy is not assumed resolved.",
+                "A matching model is fixture-specific evidence, not approval to update any expectation."))
+            saveRDS(result, file.path(evidence_dir, "batch-comparison.rds"))
+            utils::write.csv(cells, file.path(evidence_dir, "batch-cell-comparison.csv"), row.names = FALSE, na = "NA")
+            utils::write.csv(ci_cells, file.path(evidence_dir, "batch-current-ci-comparison.csv"), row.names = FALSE, na = "NA")
+            utils::write.csv(controls, file.path(evidence_dir, "batch-control-checks.csv"), row.names = FALSE)
+            utils::write.csv(summary, file.path(evidence_dir, "batch-case-summary.csv"), row.names = FALSE)
+            capture.output(result, file = file.path(evidence_dir, "batch-comparison.txt"))
+            writeLines(c("# Windows BSTS controlled diagnostic", "", result$note, "",
+              paste("Absolute numerical comparison tolerance:", format(tolerance, scientific = TRUE)), "",
+              "```", capture.output(print(summary, row.names = FALSE)), "```", "",
+              "See batch-cell-comparison.csv for every model-summary and coefficient field,",
+              "and batch-control-checks.csv for same-input/package checks. Mismatches are retained as data;",
+              "no test, expected value, or module source is changed by this comparison."),
+              file.path(evidence_dir, "batch-summary.md"))
+            result
+          }
+
           build_and_probe <- function(arm) {
             stopifnot(arm %in% c("old", "fixed"),
                       !any(c("Boom", "BoomSpikeSlab", "bsts") %in% loadedNamespaces()))
@@ -191,22 +666,8 @@ jobs:
             }
             for (p in c("Boom", "BoomSpikeSlab", "bsts"))
               stopifnot(normalizePath(find.package(p)) == normalizePath(file.path(lib, p)))
-            options(contrasts = c("contr.treatment", "contr.poly"))
-            Sys.setlocale("LC_NUMERIC", "C")
-            d <- read.csv(file.path(root, "fixture.csv"), stringsAsFactors = FALSE)
-            d <- d[c("contNormal", "facGender", "facExperim")]
-            d$facGender <- factor(d$facGender, levels = c("f", "m"))
-            d$facExperim <- factor(d$facExperim, levels = c("control", "experimental"))
-            stopifnot(nrow(d) == 100L, !anyNA(d), all(is.finite(d$contNormal)))
-            set.seed(1)
-            ss <- bsts::AddLocalLevel(list(), d$contNormal)
-            fit <- bsts::bsts(contNormal ~ facGender + facExperim, data = d,
-              state.specification = ss, niter = 10, timestamps = NULL, seed = 1,
-              expected.model.size = 3, model.options = bsts::BstsOptions(timeout.seconds = 120))
-            s <- summary(fit) # Match the backend's default burn-in; do not override it.
-            stats <- c(R2 = s$rsquare, predSd = s$prediction.sd,
-                       relGof = s$relative.gof, resSd = s$residual.sd)
-            stopifnot(length(stats) == 4L, all(is.finite(stats)), nrow(fit$coefficients) == 10L)
+            # Build both static consumers against the selected arm; never reuse the
+            # unchanged bsts binary merely because its package version matches.
             binaries <- c(list.files(file.path(lib, "Boom/lib"), pattern = "libboom\\.a$",
                                     full.names = TRUE, recursive = TRUE),
                           list.files(file.path(lib, "BoomSpikeSlab/libs"), pattern = "\\.dll$",
@@ -215,24 +676,29 @@ jobs:
                                     full.names = TRUE, recursive = TRUE))
             stopifnot(length(binaries) == 3L)
             write.csv(data.frame(file = binaries, sha256 = vapply(binaries, sha256, "")),
-                      file.path(evidence, paste0("native-hashes-", arm, ".csv")), row.names = FALSE)
+              file.path(evidence, paste0("native-hashes-", arm, ".csv")), row.names = FALSE)
             provenance <- lapply(packages$package, function(p) {
               desc <- packageDescription(p)
               list(package = p, version = desc$Version, built = desc$Built, path = find.package(p))
             })
             names(provenance) <- packages$package
-            write.csv(data.frame(statistic = names(stats), value = unname(stats)),
-                      file.path(evidence, paste0("summary-", arm, ".csv")), row.names = FALSE)
-            saveRDS(list(arm = arm, stats = stats, coefficients = s$coefficients, fit = fit,
-                         data = d, model_matrix = model.matrix(contNormal ~ facGender + facExperim, d),
-                         packages = provenance, session = sessionInfo()),
-                    file.path(evidence, paste0("result-", arm, ".rds")))
+            cases <- probe_batch_cases(file.path(evidence, "backend.R"),
+              file.path(root, "fixture.csv"), evidence, arm)
+            result <- list(arm = arm, cases = cases, packages = provenance,
+              package_versions = vapply(provenance, function(x) x$version, ""),
+              input_sha256 = vapply(file.path(evidence,
+                c("backend.R", "reference-tests.R", "reference-form.qml")), sha256, ""),
+              session = sessionInfo())
+            saveRDS(result, file.path(evidence, paste0("result-", arm, ".rds")))
             writeLines(capture.output(sessionInfo()), file.path(evidence, paste0("session-", arm, ".txt")))
-            print(stats, digits = 17)
           }
+          references <- prepare_references(file.path(evidence, "reference-tests.R"))
+          saveRDS(references, file.path(evidence, "references.rds"))
           saveRDS(packages, file.path(root, "packages.rds"))
-          dump(c("sha256", "activate", "install_source", "build_and_probe"),
+          dump(c("sha256", "activate", "install_source", "build_and_probe", "load_batch_backend", "make_batch_cases", "batch_data", "batch_coefficient_rows", "probe_batch_cases", "bsts_diagnostic_schema", "bsts_collect_calls", "bsts_literal_list", "prepare_references", "bsts_cell_value", "bsts_compare_cell", "bsts_package_versions", "compare_batch"),
                file = file.path(root, "helpers.R"))
+          # Retain the exact dumped probe/comparison program as well as source inputs.
+          stopifnot(file.copy(file.path(root, "helpers.R"), file.path(evidence, "diagnostic-helpers.R")))
 
       - name: Build shared non-Boom dependencies once
         id: common
@@ -275,72 +741,21 @@ jobs:
         run: |
           root <- file.path(Sys.getenv("RUNNER_TEMP"), "bsts-seed-ab")
           evidence <- file.path(root, "evidence")
+          source(file.path(root, "helpers.R"))
           old <- readRDS(file.path(evidence, "result-old.rds"))
           fixed <- readRDS(file.path(evidence, "result-fixed.rds"))
-          stopifnot(identical(old$data, fixed$data), identical(old$model_matrix, fixed$model_matrix))
-          versions <- function(x) vapply(x$packages, function(p) p$version, "")
-          stopifnot(identical(versions(old), versions(fixed)))
-          expected_old <- c(R2 = 0.0579395417976514, predSd = 1.06599469439761,
-                            relGof = 0.546337972019031, resSd = 1.02729362023781)
-          expected_fixed <- c(R2 = 0.0153869242271224, predSd = 1.06857850992189,
-                              relGof = 0.542811453062196, resSd = 1.05023866481121)
-          comparison <- data.frame(statistic = names(expected_old),
-            old_conversion = unname(old$stats), fixed_conversion = unname(fixed$stats),
-            historical_windows = unname(expected_old), established_unix = unname(expected_fixed))
-          write.csv(comparison, file.path(evidence, "comparison.csv"), row.names = FALSE)
-          fields <- c("coefficients", "sigma.obs", "sigma.level", "final.state",
-                      "state.contributions", "one.step.prediction.errors", "log.likelihood")
-          stopifnot(all(fields %in% names(old$fit)), all(fields %in% names(fixed$fit)))
-          differences <- setNames(lapply(fields, function(p)
-            all.equal(old$fit[[p]], fixed$fit[[p]], tolerance = 1e-12)), fields)
-          saveRDS(differences, file.path(evidence, "posterior-differences.rds"))
-          writeLines(capture.output(str(differences)), file.path(evidence, "posterior-differences.txt"))
-          coef_names <- c("facGenderm", "facExperimexperimental")
-          coef_columns <- c("mean", "sd")
-          for (x in list(old, fixed)) {
-            stopifnot(all(coef_names %in% rownames(x$coefficients)),
-                      all(coef_columns %in% colnames(x$coefficients)))
-          }
-          expected_old_coef <- matrix(c(0.609442717859108, 0.0399657905691665,
-                                        0.638874711991056, 0.271697756233028), nrow = 2,
-                                      dimnames = list(coef_names, coef_columns))
-          expected_fixed_coef <- matrix(c(0.461928614855287, -0.0501265437197341,
-                                          0.220891318762768, 0.163978897116324), nrow = 2,
-                                        dimnames = list(coef_names, coef_columns))
-          old_coef <- old$coefficients[coef_names, coef_columns, drop = FALSE]
-          fixed_coef <- fixed$coefficients[coef_names, coef_columns, drop = FALSE]
-          coef_comparison <- data.frame(coefficient = rep(coef_names, 2),
-            statistic = rep(coef_columns, each = 2), old_conversion = as.vector(old_coef),
-            fixed_conversion = as.vector(fixed_coef), historical_windows = as.vector(expected_old_coef),
-            established_unix = as.vector(expected_fixed_coef))
-          write.csv(coef_comparison, file.path(evidence, "coefficient-comparison.csv"), row.names = FALSE)
-          old_matches <- all(is.finite(old_coef)) && all(abs(old$stats - expected_old) < 1e-10) &&
-            all(abs(old_coef - expected_old_coef) < 1e-10)
-          fixed_matches <- all(is.finite(fixed_coef)) && all(abs(fixed$stats - expected_fixed) < 1e-10) &&
-            all(abs(fixed_coef - expected_fixed_coef) < 1e-10)
-          conclusion <- if (old_matches && fixed_matches) {
-            "The one-line seed change reproduces both reference model summaries and coefficient means/SDs."
-          } else {
-            "INCONCLUSIVE for the exact historical difference: inspect both results; do not update expectations."
-          }
-          report <- c("# BSTS controlled Windows seed comparison", "", conclusion, "",
-                      paste("Old conversion matches historical Windows:", old_matches),
-                      paste("Fixed conversion matches established Unix:", fixed_matches), "",
-                      "```", capture.output(print(comparison, digits = 17, row.names = FALSE)), "```", "",
-                      "```", capture.output(print(coef_comparison, digits = 17, row.names = FALSE)), "```", "",
-                      "The tolerance above classifies this experiment; it does not alter any unit-test tolerance.",
-                      "This is a ten-draw sampler diagnostic, not a posterior convergence or whole-module test.",
-                      "See source-archives.csv, source-trees.rds, install logs, native hashes and result RDS files.")
-          writeLines(report, file.path(evidence, "RESULT.md"))
+          references <- readRDS(file.path(evidence, "references.rds"))
+          comparison <- compare_batch(old, fixed, references, evidence)
+          report <- readLines(file.path(evidence, "batch-summary.md"), warn = FALSE)
           writeLines(report, Sys.getenv("GITHUB_STEP_SUMMARY"))
-          # Green means the experiment completed, NOT that the hypothesis necessarily matched.
+          # Green means all comparisons were attempted, NOT that every reference matched.
           cat(paste(report, collapse = "\n"))
 
       - name: Upload results and build logs even if a build fails
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: bsts-windows-seed-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          name: bsts-windows-model-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/bsts-seed-ab/evidence
           if-no-files-found: warn
           retention-days: 14
