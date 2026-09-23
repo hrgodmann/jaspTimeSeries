@@ -33,8 +33,6 @@ jobs:
       RENV_CONFIG_REPOS_OVERRIDE: https://packagemanager.posit.co/cran/latest
       RENV_CONFIG_PAK_ENABLED: 'false'
       RENV_CONFIG_INSTALL_VERBOSE: 'true'
-      RENV_PATHS_ROOT: ${{ runner.temp }}/renv
-      R_PKG_CACHE_DIR: ${{ runner.temp }}/pkgcache
       PKG_BUILD_CORES: '1'
       PAK_CORES: '1'
       _R_CHECK_LENGTH_1_CONDITION_: 'TRUE'
@@ -78,6 +76,10 @@ jobs:
             "Module commit: 415ceb24574ace1bfa25e0dfb184137f02a0317e",
             paste("Run:", Sys.getenv("GITHUB_RUN_ID"), Sys.getenv("GITHUB_RUN_ATTEMPT")),
             R.version.string), file.path(evidence, "input.txt"))
+          # Runner paths are only available once a step is running.
+          cat(paste0("RENV_PATHS_ROOT=", file.path(Sys.getenv("RUNNER_TEMP"), "renv"), "\n",
+            "R_PKG_CACHE_DIR=", file.path(Sys.getenv("RUNNER_TEMP"), "pkgcache"), "\n"),
+            file = Sys.getenv("GITHUB_ENV"), append = TRUE)
 
       - name: Install the renv revision used by shared CI
         run: |
