@@ -302,6 +302,7 @@ test_that("Prediction plot matches", {
     options <- jaspTools::analysisOptions("bayesianStateSpace")
     options$dependent <- "contNormal"
     options$autoregressiveComponent <- TRUE
+    options$localLevelComponent <- FALSE
     options$samples <- 10
 
     set.seed(1)
