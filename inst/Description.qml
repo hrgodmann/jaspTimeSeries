@@ -10,7 +10,7 @@ Description
 	author		: "Sophie Berkhout, Fridtjof Petersen, Henrik Godmann"
 	maintainer	: "Henrik Godmann"
 	website		: "https://jasp-stats.org"
-	license		: "GPL (>= 2)"
+	license		: "GPL (>= 3)"
 	icon		: "analysis-time-series.svg"
 	preloadData: true
 
@@ -62,6 +62,15 @@ Description
 		title:		qsTr("Bayesian State Space Models")
 		func:		"bayesianStateSpace"
 		qml:		"bayesianStateSpace.qml"
+		hasWrapper:	true
+		preloadData:	false
+	}
+
+	Analysis
+	{
+		title:		qsTr("Binomial State Space Models")
+		func:		"binomialStateSpace"
+		qml:		"binomialStateSpace.qml"
 		hasWrapper:	true
 		preloadData:	false
 	}

@@ -7,7 +7,7 @@ Author: Sophie Berkhout, Fridtjof Petersen, Henrik Godmann
 Website: https://jasp-stats.org
 Maintainer: Henrik Godmann <hrgodmann@gmail.com>
 Description: This module offers time series analyses.
-License: GPL (>= 2)
+License: GPL (>= 3)
 Encoding: UTF-8
 Imports:
   Boom,
@@ -19,10 +19,25 @@ Imports:
   jaspGraphs,
   lubridate,
   matrixStats,
+  methods,
+  parallel,
+  Rcpp (>= 1.0.7),
+  RcppParallel (>= 5.1.4),
   reshape2,
+  rstan (>= 2.32.0),
+  rstantools (>= 2.6.0),
   tseries
 Suggests:
   testthat
+LinkingTo:
+  BH (>= 1.75.0-0),
+  Rcpp (>= 1.0.7),
+  RcppEigen (>= 0.3.4.0.0),
+  RcppParallel (>= 5.1.4),
+  rstan (>= 2.32.0),
+  StanHeaders (>= 2.32.0)
+SystemRequirements: GNU make, C++17
+NeedsCompilation: yes
 RoxygenNote: 7.3.3
 Remotes:
   jasp-stats/jaspBase,
