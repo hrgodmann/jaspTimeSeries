@@ -43,7 +43,7 @@ The **Model** section specifies:
     - **Student t:** Set its positive **Scale**, default 0.5, and positive **df**, default three. Fractional degrees of freedom are allowed. Smaller df give heavier tails; df = 1 gives a Cauchy distribution with the same scale. For df greater than two, the standard deviation is `scale * sqrt(df / (df - 2))`. For df of two or less, the prior has no finite variance; for df of one or less, its mean is undefined even though it is centered at zero.
     - **Cauchy:** Set its positive **Scale**, default 0.707. This is not a standard deviation: the Cauchy prior has no finite mean or variance.
 
-The earlier unreleased prototype used a Cauchy coefficient prior by default; select **Cauchy** and set its scale to reproduce that prior. A later prototype shared one scale field across all three distributions. Saved prototype analyses or syntax using that shared field for Normal or Cauchy require reviewing and re-entering the value in the new distribution-specific setting (`priorBetaNormalSD` or `priorBetaCauchyScale`). `priorBetaScale` now sets only the Student t scale. The current defaults for new analyses are Normal SD 1, Student t scale 0.5 with df 3, and Cauchy scale 0.707; explicitly saved settings are not reset by changing these defaults. All numeric prior settings must be strictly positive. Prior settings affect inference, especially for sparse data, low trial counts, and unobserved time steps.
+All numeric prior settings must be strictly positive. Prior choices affect inference, particularly with sparse data, low trial counts, and unobserved time steps.
 
 ## Output
 

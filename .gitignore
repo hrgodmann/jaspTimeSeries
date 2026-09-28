@@ -55,3 +55,7 @@ Rproj.user
 /.Rprofile
 /renv
 _processedLockFile.lock
+src/jaspTimeSeries.so
+src/RcppExports.o
+src/stanExports_binomialLocalLevel.o
+src/stanExports_binomialLocalLevelRegression.o
